@@ -132,7 +132,55 @@
             </GlassButton>
           </div>
           <div v-if="sourceError" class="text-danger text-sm mb-3">{{ sourceError }}</div>
+          <div class="source-memory-controls mini-glass mb-4">
+            <v-text-field
+              v-model="sourceQuery.search"
+              label="Search URL memory"
+              prepend-inner-icon="mdi-magnify"
+              variant="outlined"
+              density="compact"
+              hide-details
+              @keyup.enter="applySourceQuery"
+            />
+            <v-select
+              v-model="sourceQuery.status"
+              :items="statusFilterItems"
+              label="Status"
+              variant="outlined"
+              density="compact"
+              hide-details
+              @update:model-value="applySourceQuery"
+            />
+            <v-select
+              v-model="sourceQuery.sourceType"
+              :items="sourceTypeItems"
+              label="Type"
+              variant="outlined"
+              density="compact"
+              hide-details
+              @update:model-value="applySourceQuery"
+            />
+            <v-select
+              v-model="sourceQuery.sortBy"
+              :items="sourceSortItems"
+              label="Sort"
+              variant="outlined"
+              density="compact"
+              hide-details
+              @update:model-value="loadSources"
+            />
+            <button class="hud-chip hud-chip-button" @click="toggleSourceSort">
+              <v-icon size="15">{{ sourceQuery.sortDir === 'asc' ? 'mdi-sort-ascending' : 'mdi-sort-descending' }}</v-icon>
+              {{ sourceQuery.sortDir }}
+            </button>
+            <GlassButton variant="ghost" @click="applySourceQuery">Search</GlassButton>
+          </div>
+          <div class="source-memory-summary mb-3">
+            <span>{{ sourcePager.total }} URLs</span>
+            <span>page {{ sourcePager.page }} / {{ sourcePager.totalPages }}</span>
+          </div>
           <div class="source-memory-list">
+            <div v-if="!sources.length" class="mini-glass p-4 text-white/42 text-sm">No research URLs match the current filters.</div>
             <div v-for="source in sources" :key="source.id" class="source-memory-row mini-glass">
               <div class="min-w-0">
                 <div class="font-medium truncate">{{ source.title || source.url }}</div>
@@ -155,6 +203,26 @@
                 @update:model-value="(status) => updateSource(source, { status })"
               />
             </div>
+          </div>
+          <div class="source-pagination mt-4">
+            <v-select
+              v-model="sourceQuery.pageSize"
+              :items="[10, 25, 50, 100]"
+              label="Rows"
+              variant="outlined"
+              density="compact"
+              hide-details
+              class="source-page-size"
+              @update:model-value="applySourceQuery"
+            />
+            <button class="hud-chip hud-chip-button" :disabled="sourcePager.page <= 1" @click="changeSourcePage(-1)">
+              <v-icon size="15">mdi-chevron-left</v-icon>
+              previous
+            </button>
+            <button class="hud-chip hud-chip-button" :disabled="sourcePager.page >= sourcePager.totalPages" @click="changeSourcePage(1)">
+              next
+              <v-icon size="15">mdi-chevron-right</v-icon>
+            </button>
           </div>
         </GlassCard>
       </div>
@@ -204,15 +272,49 @@ const providerDrafts = ref({});
 const providerError = ref('');
 const savingProvider = ref('');
 const sources = ref([]);
+const sourcePager = ref({ total: 0, page: 1, pageSize: 25, totalPages: 1 });
+const sourceQuery = ref({
+  page: 1,
+  pageSize: 25,
+  search: '',
+  status: '',
+  sourceType: '',
+  sortBy: 'updated_at',
+  sortDir: 'desc',
+});
 const sourceDraft = ref({ url: '', title: '' });
 const sourceError = ref('');
 const savingSource = ref(false);
+const statusFilterItems = [
+  { title: 'All statuses', value: '' },
+  { title: 'Active', value: 'active' },
+  { title: 'Paused', value: 'paused' },
+  { title: 'Blocked', value: 'blocked' },
+  { title: 'Failed', value: 'failed' },
+];
+const sourceTypeItems = [
+  { title: 'All types', value: '' },
+  { title: 'Seed', value: 'seed' },
+  { title: 'Manual', value: 'manual' },
+  { title: 'Learned', value: 'learned' },
+  { title: 'Search', value: 'search' },
+];
+const sourceSortItems = [
+  { title: 'Last updated', value: 'updated_at' },
+  { title: 'Relevance', value: 'relevance_score' },
+  { title: 'Credibility', value: 'credibility_score' },
+  { title: 'Failures', value: 'failure_count' },
+  { title: 'Successes', value: 'success_count' },
+  { title: 'Title', value: 'title' },
+  { title: 'URL', value: 'url' },
+  { title: 'Status', value: 'status' },
+  { title: 'Type', value: 'source_type' },
+];
 
 async function load() {
-  const [{ data }, providerRes, sourceRes] = await Promise.all([
+  const [{ data }, providerRes] = await Promise.all([
     api.get('/settings'),
     api.get('/settings/providers'),
-    api.get('/settings/research-sources'),
   ]);
   form.value = {
     tradingEnabled: Boolean(data.trading_enabled),
@@ -230,7 +332,44 @@ async function load() {
       Object.fromEntries(provider.fields.map((field) => [field.key, ''])),
     ])
   );
-  sources.value = sourceRes.data;
+  await loadSources();
+}
+
+async function loadSources() {
+  const { data } = await api.get('/settings/research-sources', {
+    params: {
+      ...sourceQuery.value,
+      search: sourceQuery.value.search || undefined,
+      status: sourceQuery.value.status || undefined,
+      sourceType: sourceQuery.value.sourceType || undefined,
+    },
+  });
+  sources.value = data.items || [];
+  sourcePager.value = {
+    total: data.total || 0,
+    page: data.page || 1,
+    pageSize: data.pageSize || sourceQuery.value.pageSize,
+    totalPages: data.totalPages || 1,
+  };
+  sourceQuery.value.page = sourcePager.value.page;
+  sourceQuery.value.pageSize = sourcePager.value.pageSize;
+}
+
+function applySourceQuery() {
+  sourceQuery.value.page = 1;
+  loadSources();
+}
+
+function toggleSourceSort() {
+  sourceQuery.value.sortDir = sourceQuery.value.sortDir === 'asc' ? 'desc' : 'asc';
+  loadSources();
+}
+
+function changeSourcePage(delta) {
+  const next = Math.min(sourcePager.value.totalPages, Math.max(1, sourceQuery.value.page + delta));
+  if (next === sourceQuery.value.page) return;
+  sourceQuery.value.page = next;
+  loadSources();
 }
 
 async function save() {
@@ -255,7 +394,8 @@ async function addSource() {
       tags: ['manual'],
     });
     sourceDraft.value = { url: '', title: '' };
-    await load();
+    sourceQuery.value.page = 1;
+    await loadSources();
   } catch (err) {
     sourceError.value = err.response?.data?.error || 'Research source save failed';
   } finally {
@@ -267,7 +407,7 @@ async function updateSource(source, patch) {
   sourceError.value = '';
   try {
     await api.patch(`/settings/research-sources/${source.id}`, patch);
-    await load();
+    await loadSources();
   } catch (err) {
     sourceError.value = err.response?.data?.error || 'Research source update failed';
   }

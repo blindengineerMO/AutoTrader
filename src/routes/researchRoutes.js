@@ -4,9 +4,14 @@ const tradingPlanRepo = require('../db/repositories/tradingPlanRepo');
 const decisionReportRepo = require('../db/repositories/decisionReportRepo');
 const researchRunRepo = require('../db/repositories/researchRunRepo');
 const evaluationReportRepo = require('../db/repositories/evaluationReportRepo');
+const specRepo = require('../db/repositories/specResearchRepo');
+const specBacktestRepo = require('../db/repositories/specBacktestRepo');
+const specOperationsRepo = require('../db/repositories/specOperationsRepo');
 const researchService = require('../services/researchService');
 const autonomousResearchService = require('../services/autonomousResearchService');
 const evaluationService = require('../services/evaluationService');
+const safeResearchMvpService = require('../services/spec/safeResearchMvpService');
+const modelPromotionService = require('../services/spec/modelPromotionService');
 const { runTradingCycle } = require('../services/tradingCycle');
 const MockBrokerClient = require('../services/broker/MockBrokerClient');
 const RobinhoodBrokerClient = require('../services/broker/RobinhoodBrokerClient');
@@ -33,6 +38,72 @@ router.get('/reports', (req, res) => {
 router.get('/evaluations', (req, res) => {
   const limit = Number(req.query.limit) || 30;
   res.json(evaluationReportRepo.listByUser(req.user.id, limit));
+});
+
+router.get('/spec-monitoring', (req, res) => {
+  res.json(specBacktestRepo.listMonitoring(req.user.id));
+});
+
+router.get('/spec-data-quality', (req, res) => {
+  const limit = Number(req.query.limit) || 20;
+  res.json(specRepo.listQualityReports(req.user.id, limit));
+});
+
+router.get('/safe-mvp/backtests', (req, res) => {
+  const limit = Number(req.query.limit) || 20;
+  res.json(specBacktestRepo.listRuns(req.user.id, limit));
+});
+
+router.get('/safe-mvp/backtests/:runId/events', (req, res) => {
+  res.json(specBacktestRepo.listEvents(req.user.id, req.params.runId));
+});
+
+router.get('/spec-risk-checks/:runId', (req, res) => {
+  res.json(specRepo.listRiskChecks(req.user.id, req.params.runId));
+});
+
+router.get('/spec-audit/:runId', (req, res) => {
+  res.json(specRepo.listAuditEvents(req.user.id, req.params.runId));
+});
+
+router.get('/spec-paper-intents/:runId', (req, res) => {
+  res.json(specRepo.listPaperOrderIntents(req.user.id, req.params.runId));
+});
+
+router.get('/spec-models', (req, res) => {
+  const limit = Number(req.query.limit) || 50;
+  res.json({
+    models: specRepo.listModels(req.user.id, limit),
+    promotionReviews: specRepo.listPromotionReviews(req.user.id, limit),
+    trainingSnapshots: specRepo.listTrainingSnapshots(req.user.id, limit),
+    rollbacks: specRepo.listRollbackEvents(req.user.id, limit),
+  });
+});
+
+router.post('/spec-models/:modelVersion/rollback', (req, res) => {
+  try {
+    const model = modelPromotionService.rollbackChampion({
+      userId: req.user.id,
+      targetModelVersion: req.params.modelVersion,
+      approvedBy: req.user.email || `user:${req.user.id}`,
+      reason: req.body?.reason || 'Operator rollback from Research Desk.',
+    });
+    res.json(model);
+  } catch (err) {
+    logger.error('SPEC model rollback failed', { userId: req.user.id, modelVersion: req.params.modelVersion, error: err.message });
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.get('/spec-reconciliations', (req, res) => {
+  const limit = Number(req.query.limit) || 20;
+  res.json(specOperationsRepo.listReconciliations(req.user.id, limit));
+});
+
+router.get('/spec-reconciliations/:runId', (req, res) => {
+  const reconciliation = specOperationsRepo.getReconciliation(req.user.id, req.params.runId);
+  if (!reconciliation) return res.status(404).json({ error: 'Reconciliation run not found' });
+  res.json(reconciliation);
 });
 
 router.post('/evaluate', async (req, res) => {
@@ -115,6 +186,22 @@ router.post('/run-research-only', async (req, res) => {
     const snapshot = await researchService.runResearchCycle(undefined, { userId: req.user.id });
     res.json(snapshot);
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/safe-mvp', async (req, res) => {
+  try {
+    const watchlist = Array.isArray(req.body?.watchlist) && req.body.watchlist.length
+      ? req.body.watchlist
+      : undefined;
+    const result = await safeResearchMvpService.runSafeResearchMvp({
+      userId: req.user.id,
+      watchlist,
+    });
+    res.json(result);
+  } catch (err) {
+    logger.error('Safe research MVP failed', { userId: req.user.id, error: err.message });
     res.status(500).json({ error: err.message });
   }
 });

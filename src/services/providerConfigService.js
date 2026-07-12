@@ -73,12 +73,12 @@ const PROVIDERS = [
     providerType: 'chat-research',
     providerKey: 'duck-ai',
     displayName: 'Duck.ai',
-    description: 'Duck.ai public web chat is tracked as a research option, but browser-session scraping is intentionally disabled unless DuckDuckGo provides a sanctioned endpoint.',
+    description: 'Duck.ai research can use a configured sanctioned endpoint or the public webapp through a persistent Playwright browser session.',
     fields: [
       { key: 'sanctionedEndpoint', label: 'Sanctioned endpoint URL', secret: false, placeholder: config.duckAiResearch.sanctionedEndpoint || 'No official server endpoint configured' },
       { key: 'model', label: 'Model', secret: false, placeholder: config.duckAiResearch.model || 'duck.ai web chat' },
     ],
-    envConfigured: () => Boolean(config.duckAiResearch.sanctionedEndpoint),
+    envConfigured: () => Boolean(config.duckAiResearch.sanctionedEndpoint || config.duckAiResearch.browserEnabled),
   },
   {
     providerType: 'market-data',

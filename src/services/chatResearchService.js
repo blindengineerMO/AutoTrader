@@ -2,6 +2,7 @@ const OpenAI = require('openai');
 const { config } = require('../config');
 const providerCredentialRepo = require('../db/repositories/providerCredentialRepo');
 const researchSourceRepo = require('../db/repositories/researchSourceRepo');
+const duckAiWebClient = require('./duckAiWebClient');
 
 const SYSTEM_PROMPT = `You are an autonomous investment research assistant inside AutoTrader.
 Use only the evidence supplied in the prompt. Do not invent URLs, prices, or facts.
@@ -44,7 +45,7 @@ async function runChatResearch({ userId, news, learned, macro, consumer, jsonDat
   for (const provider of providers) {
     if (provider.kind === 'unsupported-web-chat') {
       results.push(skippedDuckAi(provider));
-      emit(onEvent, 'chat-research', 36, 'warn', 'Duck.ai public web chat automation skipped; no sanctioned server-side endpoint configured.', {
+      emit(onEvent, 'chat-research', 36, 'warn', 'Duck.ai public webapp automation skipped; no endpoint configured and browser mode is disabled.', {
         provider: provider.provider,
         publicUrl: provider.publicUrl,
       });
@@ -130,6 +131,12 @@ function buildProviders(userId) {
       provider: 'duck-ai',
       model: userDuck?.model || config.duckAiResearch.model || 'duck-ai-sanctioned-endpoint',
       ask: (payload) => askSanctionedDuckEndpoint({ endpoint: duckEndpoint, payload }),
+    });
+  } else if (config.duckAiResearch.browserEnabled) {
+    providers.push({
+      provider: 'duck-ai',
+      model: userDuck?.model || config.duckAiResearch.model || 'public-webapp-session',
+      ask: (payload) => duckAiWebClient.askDuckAiWeb({ payload, systemPrompt: SYSTEM_PROMPT }),
     });
   } else {
     providers.push({
@@ -361,7 +368,7 @@ function skippedDuckAi(provider) {
     model: provider.model,
     available: false,
     skipped: true,
-    error: 'Duck.ai public web chat has no configured sanctioned server-side endpoint. Browser-session scraping is disabled.',
+    error: 'Duck.ai has no configured endpoint and browser-session automation is disabled.',
     summary: '',
     candidateHints: [],
     sourceHints: [],

@@ -25,6 +25,10 @@
           <GlassButton variant="ghost" :disabled="isBusy" @click="runEvaluation">
             {{ running === 'evaluation' ? 'Evaluating...' : 'Run evaluation' }}
           </GlassButton>
+          <GlassButton variant="ghost" :disabled="isBusy" @click="runSafeMvp">
+            <v-icon size="16" class="mr-1">mdi-shield-check</v-icon>
+            {{ running === 'safe-mvp' ? 'Validating...' : 'Run SPEC safe MVP' }}
+          </GlassButton>
         </div>
         <div class="flex flex-wrap gap-2 mt-4">
           <button class="hud-window-toggle" :class="{ active: sourcesOpen }" @click="sourcesOpen = !sourcesOpen">
@@ -69,28 +73,45 @@
       </GlassCard>
 
       <GlassCard title="Highest value candidates" class="bento-span-7">
-        <div v-if="!latestSignals.length" class="text-white/42 text-sm">No scored candidates yet.</div>
-        <div v-else class="candidate-grid">
-          <div v-for="s in latestSignals.slice(0, 6)" :key="s.symbol" class="candidate-card mini-glass">
-            <div class="flex items-start justify-between gap-3">
-              <div>
-                <div class="font-headline text-lg">{{ s.symbol }}</div>
-                <div class="text-xs text-white/40">{{ s.theme || 'watchlist' }}</div>
-              </div>
-              <div class="score-ring" :style="{ '--score': `${s.localAiScore || 0}%` }">
-                <span>{{ s.localAiScore || 'n/a' }}</span>
-              </div>
+        <div class="candidate-split-grid">
+          <section class="candidate-panel mini-glass">
+            <div class="candidate-panel-head">
+              <span>Top 5 purchase candidates</span>
+              <v-icon size="17" class="text-accent">mdi-trending-up</v-icon>
             </div>
-            <div class="flex items-end justify-between mt-5">
-              <div>
-                <div class="font-headline text-2xl" :class="s.changePct >= 0 ? 'text-accent' : 'text-danger'">
-                  {{ s.changePct >= 0 ? '+' : '' }}{{ s.changePct }}%
+            <div v-if="!purchaseCandidates.length" class="text-white/42 text-xs">No current buy candidates.</div>
+            <div v-else class="candidate-stack">
+              <div v-for="s in purchaseCandidates" :key="`buy-${s.symbol}`" class="candidate-row">
+                <div class="min-w-0">
+                  <strong class="font-headline">{{ s.symbol }}</strong>
+                  <small>{{ s.theme || 'watchlist' }}</small>
                 </div>
-                <div class="text-xs text-white/40">${{ fmt(s.price) }} · {{ s.volatilityPct }}% range</div>
+                <div class="text-right">
+                  <span class="text-accent font-headline">{{ s.localAiScore || 'n/a' }}</span>
+                  <small>{{ s.changePct >= 0 ? '+' : '' }}{{ s.changePct }}%</small>
+                </div>
               </div>
-              <span class="hud-chip">{{ s.actionBias || s.momentum }}</span>
             </div>
-          </div>
+          </section>
+          <section class="candidate-panel mini-glass danger-panel">
+            <div class="candidate-panel-head">
+              <span>Top 5 sell value candidates</span>
+              <v-icon size="17" class="text-danger">mdi-trending-down</v-icon>
+            </div>
+            <div v-if="!sellCandidates.length" class="text-white/42 text-xs">No current sell candidates.</div>
+            <div v-else class="candidate-stack">
+              <div v-for="s in sellCandidates" :key="`sell-${s.symbol}`" class="candidate-row">
+                <div class="min-w-0">
+                  <strong class="font-headline">{{ s.symbol }}</strong>
+                  <small>{{ s.actionBias || s.momentum || 'risk review' }}</small>
+                </div>
+                <div class="text-right">
+                  <span class="text-danger font-headline">{{ sellScore(s) }}</span>
+                  <small>{{ s.changePct >= 0 ? '+' : '' }}{{ s.changePct }}%</small>
+                </div>
+              </div>
+            </div>
+          </section>
         </div>
       </GlassCard>
 
@@ -104,6 +125,62 @@
             <span class="hud-chip">{{ latestEvaluation.summary?.evaluatedDecisionReports || 0 }} reports</span>
             <span class="hud-chip">{{ latestEvaluation.summary?.evaluatedActions || 0 }} actions</span>
             <span class="hud-chip">{{ latestEvaluation.summary?.avgObservedReturnPct || 0 }}% avg</span>
+          </div>
+        </div>
+      </GlassCard>
+
+      <GlassCard title="SPEC safety monitor" class="bento-span-8">
+        <div v-if="!safeMvpResult" class="text-white/42 text-sm">Run the SPEC safe MVP to validate point-in-time data, approved model status, target portfolio, and deterministic risk checks.</div>
+        <div v-else>
+          <div class="flex flex-wrap gap-2 mb-4">
+            <span class="hud-chip">{{ safeMvpResult.market_regime }}</span>
+            <span class="hud-chip">{{ safeMvpResult.model_version }}</span>
+            <span class="hud-chip">{{ safeMvpResult.dataset_version }}</span>
+          </div>
+          <div class="candidate-split-grid">
+            <section class="candidate-panel mini-glass">
+              <div class="candidate-panel-head">
+                <span>Target portfolio</span>
+                <v-icon size="17" class="text-accent">mdi-vector-polyline</v-icon>
+              </div>
+              <div v-if="!safeMvpResult.portfolio?.length" class="text-white/42 text-xs">No targets generated.</div>
+              <div v-else class="candidate-stack">
+                <div v-for="item in safeMvpResult.portfolio.slice(0, 6)" :key="`safe-${item.symbol}`" class="candidate-row">
+                  <div class="min-w-0">
+                    <strong class="font-headline">{{ item.symbol }}</strong>
+                    <small>{{ item.reason_codes?.slice(0, 2).join(', ') }}</small>
+                  </div>
+                  <div class="text-right">
+                    <span class="text-accent font-headline">{{ pct(item.target_weight) }}</span>
+                    <small>conf {{ pct(item.confidence) }}</small>
+                  </div>
+                </div>
+              </div>
+            </section>
+            <section class="candidate-panel mini-glass danger-panel">
+              <div class="candidate-panel-head">
+                <span>Risk failures</span>
+                <v-icon size="17" class="text-danger">mdi-alert-octagon-outline</v-icon>
+              </div>
+              <div v-if="!riskFailures.length" class="text-white/42 text-xs">No critical failures in the last safe run.</div>
+              <div v-else class="candidate-stack">
+                <div v-for="check in riskFailures.slice(0, 6)" :key="`${check.checkName}-${check.symbol}`" class="candidate-row">
+                  <div class="min-w-0">
+                    <strong class="font-headline">{{ check.symbol || check.checkName }}</strong>
+                    <small>{{ check.reason }}</small>
+                  </div>
+                  <span class="hud-chip text-danger">{{ check.severity }}</span>
+                </div>
+              </div>
+            </section>
+          </div>
+          <div class="hud-card-meta mt-4">
+            <span class="hud-chip">{{ safeMvpResult.risk_checks?.length || 0 }} checks</span>
+            <span class="hud-chip">{{ safeMvpResult.rejected_trades?.length || 0 }} rejected</span>
+            <span class="hud-chip">{{ safeMvpResult.paper_order_intents?.length || 0 }} paper intents</span>
+            <button class="hud-chip hud-chip-button" @click="loadSafeRunDetail('risk')">risk</button>
+            <button class="hud-chip hud-chip-button" @click="loadSafeRunDetail('paper')">paper</button>
+            <button class="hud-chip hud-chip-button" @click="loadSafeRunDetail('audit')">audit</button>
           </div>
         </div>
       </GlassCard>
@@ -142,6 +219,112 @@
               </div>
             </div>
           </div>
+        </div>
+      </GlassCard>
+
+      <GlassCard title="SPEC backtests & monitoring" class="bento-span-12">
+        <div class="candidate-split-grid">
+          <section class="candidate-panel mini-glass">
+            <div class="candidate-panel-head">
+              <span>Monitoring</span>
+              <v-icon size="17" class="text-accent">mdi-monitor-dashboard</v-icon>
+            </div>
+            <div v-if="!specMonitoring.length" class="text-white/42 text-xs">No SPEC monitoring records yet.</div>
+            <div v-else class="candidate-stack">
+              <div v-for="item in specMonitoring" :key="item.status_key" class="candidate-row">
+                <div class="min-w-0">
+                  <strong class="font-headline">{{ item.status_key }}</strong>
+                  <small>{{ item.observed_at }}</small>
+                </div>
+                <span class="hud-chip" :class="item.status === 'fail' ? 'text-danger' : item.status === 'warn' ? 'text-warning' : 'text-accent'">{{ item.status }}</span>
+              </div>
+            </div>
+          </section>
+          <section class="candidate-panel mini-glass">
+            <div class="candidate-panel-head">
+              <span>Backtests</span>
+              <v-icon size="17" class="text-accent">mdi-chart-timeline-variant</v-icon>
+            </div>
+            <div v-if="!specBacktests.length" class="text-white/42 text-xs">No safe-MVP backtest records yet.</div>
+            <div v-else class="candidate-stack">
+              <div v-for="run in specBacktests.slice(0, 5)" :key="run.run_id" class="candidate-row">
+                <div class="min-w-0">
+                  <strong class="font-headline">{{ run.run_id }}</strong>
+                  <small>turnover {{ pct(run.metrics?.turnover || 0) }} · costs ${{ fmt(run.metrics?.transactionCostsUsd || 0) }}</small>
+                </div>
+                <button class="hud-chip hud-chip-button" @click="loadBacktestEvents(run.run_id)">{{ run.status }}</button>
+              </div>
+            </div>
+          </section>
+        </div>
+        <div class="spec-drill-grid mt-4">
+          <section class="candidate-panel mini-glass">
+            <div class="candidate-panel-head">
+              <span>Model lifecycle</span>
+              <v-icon size="17" class="text-accent">mdi-brain</v-icon>
+            </div>
+            <div v-if="!specModels.length" class="text-white/42 text-xs">No model registry records loaded.</div>
+            <div v-else class="candidate-stack">
+              <div v-for="model in specModels.slice(0, 4)" :key="model.model_version" class="candidate-row">
+                <div class="min-w-0">
+                  <strong class="font-headline">{{ model.model_version }}</strong>
+                  <small>{{ model.model_type }} · {{ snapshotCount(model.model_version) }} snapshots</small>
+                </div>
+                <button
+                  class="hud-chip hud-chip-button"
+                  :disabled="model.status === 'champion'"
+                  @click="rollbackModel(model.model_version)"
+                >
+                  {{ model.status === 'champion' ? 'champion' : 'rollback' }}
+                </button>
+              </div>
+            </div>
+          </section>
+          <section class="candidate-panel mini-glass">
+            <div class="candidate-panel-head">
+              <span>Data quality</span>
+              <v-icon size="17" class="text-accent">mdi-database-check-outline</v-icon>
+            </div>
+            <div v-if="!specDataQuality.length" class="text-white/42 text-xs">No data-quality reports yet.</div>
+            <div v-else class="candidate-stack">
+              <button v-for="report in specDataQuality.slice(0, 4)" :key="report.id" class="candidate-row clickable-row" @click="showDataQuality(report)">
+                <div class="min-w-0">
+                  <strong class="font-headline">{{ report.dataset_version }}</strong>
+                  <small>{{ report.scope }} · {{ report.created_at }}</small>
+                </div>
+                <span class="hud-chip" :class="report.status === 'fail' ? 'text-danger' : report.status === 'warn' ? 'text-warning' : 'text-accent'">{{ report.status }}</span>
+              </button>
+            </div>
+          </section>
+          <section class="candidate-panel mini-glass">
+            <div class="candidate-panel-head">
+              <span>Reconciliation</span>
+              <v-icon size="17" class="text-accent">mdi-scale-balance</v-icon>
+            </div>
+            <div v-if="!specReconciliations.length" class="text-white/42 text-xs">No paper reconciliation runs yet.</div>
+            <div v-else class="candidate-stack">
+              <button v-for="run in specReconciliations.slice(0, 4)" :key="run.run_id" class="candidate-row clickable-row" @click="loadReconciliation(run.run_id)">
+                <div class="min-w-0">
+                  <strong class="font-headline">{{ run.run_id }}</strong>
+                  <small>{{ run.summary?.differences || 0 }} differences</small>
+                </div>
+                <span class="hud-chip" :class="run.status === 'fail' ? 'text-danger' : run.status === 'warn' ? 'text-warning' : 'text-accent'">{{ run.status }}</span>
+              </button>
+            </div>
+          </section>
+          <section class="candidate-panel mini-glass spec-detail-panel">
+            <div class="candidate-panel-head">
+              <span>Drill-down</span>
+              <v-icon size="17" class="text-accent">mdi-console-line</v-icon>
+            </div>
+            <div v-if="!specDetailLines.length" class="text-white/42 text-xs">Select a backtest, data-quality, audit, paper, or reconciliation row to inspect details.</div>
+            <div v-else class="spec-detail-lines">
+              <div v-for="line in specDetailLines" :key="line.key" class="spec-detail-line">
+                <strong>{{ line.label }}</strong>
+                <code>{{ line.value }}</code>
+              </div>
+            </div>
+          </section>
         </div>
       </GlassCard>
     </div>
@@ -228,6 +411,16 @@ const plans = ref([]);
 const reports = ref([]);
 const evaluations = ref([]);
 const runs = ref([]);
+const safeMvpResult = ref(null);
+const specMonitoring = ref([]);
+const specBacktests = ref([]);
+const specDataQuality = ref([]);
+const specModels = ref([]);
+const specPromotionReviews = ref([]);
+const specTrainingSnapshots = ref([]);
+const specRollbacks = ref([]);
+const specReconciliations = ref([]);
+const specDetail = ref(null);
 const activeRun = ref(null);
 const selectedRun = ref(null);
 const terminalOpen = ref(false);
@@ -243,6 +436,27 @@ const latestEvaluation = computed(() => evaluations.value[0] || null);
 const sourceStack = computed(() => latestReport.value?.summary?.sourceStack || snapshots.value[0]?.summary?.sourceStack || []);
 const isBusy = computed(() => ['queued', 'running'].includes(activeRun.value?.status) || Boolean(running.value));
 const terminalRun = computed(() => selectedRun.value || activeRun.value);
+const purchaseCandidates = computed(() =>
+  [...latestSignals.value]
+    .filter((signal) => signal.actionBias === 'buy-candidate' || Number(signal.localAiScore || 0) >= 58)
+    .sort((a, b) => Number(b.localAiScore || 0) - Number(a.localAiScore || 0))
+    .slice(0, 5)
+);
+const sellCandidates = computed(() =>
+  [...latestSignals.value]
+    .filter((signal) => sellScore(signal) >= 45)
+    .sort((a, b) => sellScore(b) - sellScore(a))
+    .slice(0, 5)
+);
+const riskFailures = computed(() => (safeMvpResult.value?.risk_checks || []).filter((check) => check.status === 'fail'));
+const specDetailLines = computed(() => {
+  if (!specDetail.value) return [];
+  return Object.entries(specDetail.value).map(([key, value]) => ({
+    key,
+    label: key.replace(/_/g, ' '),
+    value: typeof value === 'string' ? value : compact(value),
+  }));
+});
 
 async function load() {
   const [snapRes, planRes, reportRes, evalRes, runRes] = await Promise.all([
@@ -257,9 +471,142 @@ async function load() {
   reports.value = reportRes.data;
   evaluations.value = evalRes.data;
   runs.value = runRes.data;
+  void refreshSpecPanels();
   if (!activeRun.value) {
     const current = runs.value.find((run) => ['queued', 'running'].includes(run.status));
     if (current) startPolling(current.id);
+  }
+}
+
+async function refreshSpecPanels() {
+  const emptyModelState = {
+    models: [],
+    promotionReviews: [],
+    trainingSnapshots: [],
+    rollbacks: [],
+  };
+  const [monitorData, backtestData, qualityData, modelData, reconciliationData] = await Promise.all([
+    optionalResearchGet('/research/spec-monitoring', []),
+    optionalResearchGet('/research/safe-mvp/backtests', []),
+    optionalResearchGet('/research/spec-data-quality', []),
+    optionalResearchGet('/research/spec-models', emptyModelState),
+    optionalResearchGet('/research/spec-reconciliations', []),
+  ]);
+
+  specMonitoring.value = monitorData;
+  specBacktests.value = backtestData;
+  specDataQuality.value = qualityData;
+  specModels.value = modelData.models || [];
+  specPromotionReviews.value = modelData.promotionReviews || [];
+  specTrainingSnapshots.value = modelData.trainingSnapshots || [];
+  specRollbacks.value = modelData.rollbacks || [];
+  specReconciliations.value = reconciliationData;
+}
+
+async function optionalResearchGet(path, fallback) {
+  try {
+    const { data } = await api.get(path);
+    return data ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function showDataQuality(report) {
+  specDetail.value = {
+    type: 'data quality',
+    dataset_version: report.dataset_version,
+    status: report.status,
+    critical: Boolean(report.critical),
+    metrics: report.metrics,
+    warnings: report.warnings,
+  };
+}
+
+async function loadSafeRunDetail(type) {
+  const runId = safeMvpResult.value?.run_id;
+  if (!runId) return;
+  const endpoints = {
+    risk: `/research/spec-risk-checks/${runId}`,
+    paper: `/research/spec-paper-intents/${runId}`,
+    audit: `/research/spec-audit/${runId}`,
+  };
+  error.value = '';
+  try {
+    const { data } = await api.get(endpoints[type]);
+    specDetail.value = {
+      type,
+      run_id: runId,
+      count: data.length,
+      sample: data.slice(0, 8),
+    };
+  } catch (err) {
+    error.value = err.response?.data?.error || 'Safe run drill-down failed';
+  }
+}
+
+async function rollbackModel(modelVersion) {
+  error.value = '';
+  try {
+    const { data } = await api.post(`/research/spec-models/${modelVersion}/rollback`, {
+      reason: 'Operator rollback from Research Desk.',
+    });
+    specDetail.value = {
+      type: 'model rollback',
+      model_version: data.model_version,
+      status: data.status,
+      approved_by: data.approved_by,
+      promotion_report: data.promotionReport,
+    };
+    await load();
+  } catch (err) {
+    error.value = err.response?.data?.error || 'Model rollback failed';
+  }
+}
+
+async function loadBacktestEvents(runId) {
+  error.value = '';
+  try {
+    const { data } = await api.get(`/research/safe-mvp/backtests/${runId}/events`);
+    specDetail.value = {
+      type: 'backtest events',
+      run_id: runId,
+      event_count: data.length,
+      latest_event: data.at(-1)?.event_type || 'none',
+      sample: data.slice(0, 6).map((event) => `${event.event_type}:${event.symbol || 'portfolio'}`),
+    };
+  } catch (err) {
+    error.value = err.response?.data?.error || 'Backtest event drill-down failed';
+  }
+}
+
+async function loadReconciliation(runId) {
+  error.value = '';
+  try {
+    const { data } = await api.get(`/research/spec-reconciliations/${runId}`);
+    specDetail.value = {
+      type: 'reconciliation',
+      run_id: runId,
+      status: data.status,
+      summary: data.summary,
+      differences: data.differences?.slice(0, 6) || [],
+    };
+  } catch (err) {
+    error.value = err.response?.data?.error || 'Reconciliation drill-down failed';
+  }
+}
+
+async function runSafeMvp() {
+  error.value = '';
+  running.value = 'safe-mvp';
+  try {
+    const { data } = await api.post('/research/safe-mvp');
+    safeMvpResult.value = data;
+    await load();
+  } catch (err) {
+    error.value = err.response?.data?.error || 'SPEC safe MVP failed';
+  } finally {
+    running.value = false;
   }
 }
 
@@ -316,7 +663,7 @@ function startPolling(runId) {
       }
     } catch (err) {
       clearPolling();
-      error.value = err.response?.data?.error || 'Research status polling failed';
+      error.value = formatApiError(err, 'Research status polling failed');
     }
   }, 1400);
 }
@@ -346,6 +693,10 @@ function fmt(value) {
   return Number(value ?? 0).toFixed(2);
 }
 
+function pct(value) {
+  return `${(Number(value || 0) * 100).toFixed(1)}%`;
+}
+
 function timeOnly(value) {
   return value ? new Date(value).toLocaleTimeString() : '';
 }
@@ -353,5 +704,23 @@ function timeOnly(value) {
 function compact(value) {
   const text = JSON.stringify(value);
   return text.length > 180 ? `${text.slice(0, 180)}...` : text;
+}
+
+function formatApiError(err, fallback) {
+  const message = err.response?.data?.error || err.message || fallback;
+  return message === 'Not found' ? fallback : message;
+}
+
+function snapshotCount(modelVersion) {
+  return specTrainingSnapshots.value.filter((snapshot) => snapshot.model_version === modelVersion).length;
+}
+
+function sellScore(signal) {
+  const local = Number(signal?.localAiScore ?? 50);
+  const change = Number(signal?.changePct || 0);
+  const volatility = Number(signal?.volatilityPct || 0);
+  const explicit = ['sell-or-avoid', 'sell-candidate', 'avoid'].includes(signal?.actionBias) ? 24 : 0;
+  const downside = change < 0 ? Math.abs(change) * 5 : 0;
+  return Math.round(Math.max(0, 100 - local + downside + volatility * 2 + explicit));
 }
 </script>

@@ -50,7 +50,8 @@ const router = useRouter();
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: 'mdi-view-dashboard' },
-  { to: '/research', label: 'Research & Strategy', icon: 'mdi-radar' },
+  { to: '/research', label: 'Research', icon: 'mdi-radar' },
+  { to: '/agents', label: 'Agents', icon: 'mdi-account-group' },
   { to: '/workspace', label: 'Workspace', icon: 'mdi-briefcase-search' },
   { to: '/reports', label: 'Reports', icon: 'mdi-file-chart' },
   { to: '/orders', label: 'Trade Log', icon: 'mdi-swap-horizontal' },

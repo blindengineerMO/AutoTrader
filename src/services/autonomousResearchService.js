@@ -4,11 +4,13 @@ const finnhub = require('./marketData/finnhubClient');
 const webScrapeClient = require('./marketData/webScrapeClient');
 const sourceLearning = require('./researchSourceLearningService');
 const brainModelService = require('./brainModelService');
+const ensembleService = require('./models/ensembleService');
 const companyIntelligence = require('./companyIntelligenceService');
 const investorPlaybook = require('./investorPlaybookService');
 const jsonDatasetIndicators = require('./jsonDatasetIndicatorService');
 const companyDiscovery = require('./companyDiscoveryService');
 const chatResearch = require('./chatResearchService');
+const brainMesh = require('./brainMeshService');
 const { config } = require('../config');
 const logger = require('../utils/logger');
 
@@ -35,6 +37,20 @@ const POSITIVE_TERMS = ['beat', 'growth', 'surge', 'record', 'strong', 'rally', 
 const NEGATIVE_TERMS = ['miss', 'fall', 'slump', 'weak', 'risk', 'warning', 'cut', 'lawsuit', 'recession', 'slowdown'];
 
 async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, researchRunId, onEvent = () => {} } = {}) {
+  const meshConversation = brainMesh.startConversation({
+    userId,
+    topic: `autonomous-research${researchRunId ? `:${researchRunId}` : ''}`,
+    metadata: { researchRunId, watchlist },
+  });
+  meshTell({
+    conversation: meshConversation,
+    from: 'brain.research.source',
+    to: ['brain.discovery.company', 'brain.research.chat', 'brain.model.neural'],
+    op: 'research.run.started',
+    body: { watchlist, researchRunId },
+    userId,
+    researchRunId,
+  });
   emit(onEvent, 'source-scan', 8, 'info', 'Collecting market, news, macro, and consumer-sales inputs.', {
     watchlist,
   });
@@ -46,8 +62,52 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
     collectConsumerSales(onEvent),
     jsonDatasetIndicators.collectJsonDatasetIndicators({ onEvent }),
   ]);
+  meshTell({
+    conversation: meshConversation,
+    from: 'brain.research.source',
+    to: ['brain.discovery.company', 'brain.research.chat'],
+    op: 'research.collection.ready',
+    body: {
+      learnedObservations: learned.observations.length,
+      learnedSources: learned.learnedSources.length,
+      newsItems: news.items.length,
+      macroIndicators: macro.indicators.length,
+      consumerReports: consumer.reports.length,
+      jsonDatasetSources: jsonDatasets.sourceList?.length || 0,
+    },
+    userId,
+    researchRunId,
+  });
 
-  const initialDiscoveredCompanies = companyDiscovery.discoverCompanies({ news, learned });
+  const crawledDiscoveredCompanies = companyDiscovery.discoverCompanies({ news, learned, maxCandidates: 36 });
+  const entityExpandedCompanies = await expandEntityLeadsWithFinnhub({
+    userId,
+    entityLeads: learned.entityLeads || [],
+    onEvent,
+  });
+  const initialDiscoveredCompanies = mergeDiscoveredCompanies(crawledDiscoveredCompanies, entityExpandedCompanies).slice(0, 42);
+  meshTell({
+    conversation: meshConversation,
+    from: 'brain.discovery.company',
+    to: ['brain.research.chat', 'brain.intelligence.company'],
+    op: 'candidate.discovery.ready',
+    body: {
+      candidates: initialDiscoveredCompanies.slice(0, 12).map((candidate) => ({
+        symbol: candidate.symbol,
+        companyName: candidate.companyName,
+        themeHits: candidate.themeHits,
+        method: candidate.discovery?.method,
+        reason: candidate.discovery?.evidence?.[0]?.reason,
+      })),
+      entityLeads: (learned.entityLeads || []).slice(0, 12).map((lead) => ({
+        name: lead.name,
+        symbol: lead.symbol,
+        score: lead.score,
+      })),
+    },
+    userId,
+    researchRunId,
+  });
   const chatResearchResult = await chatResearch.runChatResearch({
     userId,
     news,
@@ -58,7 +118,43 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
     discoveredCompanies: initialDiscoveredCompanies,
     onEvent,
   });
+  meshTell({
+    conversation: meshConversation,
+    from: 'brain.research.chat',
+    to: ['brain.research.source', 'brain.discovery.company'],
+    op: 'chat.research.ready',
+    body: {
+      providers: chatResearchResult.providers.map((provider) => ({
+        provider: provider.provider,
+        available: provider.available,
+        skipped: provider.skipped,
+        error: provider.error,
+      })),
+      candidateHints: chatResearchResult.candidateHints.slice(0, 12),
+      sourceHints: chatResearchResult.sourceHints.slice(0, 12),
+    },
+    userId,
+    researchRunId,
+  });
   const prePlan = buildPrePlan({ watchlist, news, macro, consumer, learned, jsonDatasets, chatResearch: chatResearchResult, discoveredCompanies: initialDiscoveredCompanies });
+  meshTell({
+    conversation: meshConversation,
+    from: 'brain.discovery.company',
+    to: ['brain.intelligence.company', 'brain.model.neural', 'brain.playbook.investor'],
+    op: 'preplan.ready',
+    body: {
+      thesis: prePlan.thesis,
+      candidates: prePlan.candidates.map((candidate) => ({
+        symbol: candidate.symbol,
+        theme: candidate.theme,
+        themeHits: candidate.themeHits,
+        fromChat: Boolean(candidate.chatResearch),
+        fromCrawl: Boolean(candidate.discovery),
+      })).slice(0, 30),
+    },
+    userId,
+    researchRunId,
+  });
   emit(onEvent, 'pre-plan', 38, 'debug', 'Generated first-pass opportunity map from news themes, crawled company discovery, and economic context.', {
     candidates: prePlan.candidates.map((c) => c.symbol),
     discoveredCompanies: prePlan.discoveredCompanies.map((c) => ({ symbol: c.symbol, score: c.themeHits, reason: c.discovery?.evidence?.[0]?.reason })),
@@ -76,6 +172,22 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
   });
   const investorPlaybookSummary = investorPlaybook.getPlaybookSummary();
   const scored = scoreCandidates({ userId, candidates: prePlan.candidates, quotes, news, macro, consumer, learned, companyIntel, jsonDatasets, onEvent });
+  meshTell({
+    conversation: meshConversation,
+    from: 'brain.model.neural',
+    to: ['brain.reporting', 'brain.evaluation'],
+    op: 'candidate.scores.ready',
+    body: {
+      scored: scored.slice(0, 12).map((signal) => ({
+        symbol: signal.symbol,
+        localAiScore: signal.localAiScore,
+        actionBias: signal.actionBias,
+        theme: signal.theme,
+      })),
+    },
+    userId,
+    researchRunId,
+  });
 
   emit(onEvent, 'financial-evaluation', 72, 'debug', 'Financial resource pass complete; ranking candidates by blended signal score.', {
     top: scored.slice(0, 6).map((s) => ({ symbol: s.symbol, score: s.localAiScore, actionBias: s.actionBias })),
@@ -120,6 +232,7 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
           followedLinks: item.links.slice(0, 5),
         })),
         discovered: learned.discovered,
+        entityLeads: learned.entityLeads || [],
       },
       chatResearch: chatResearchResult,
       discoveredCompanies: prePlan.discoveredCompanies,
@@ -168,9 +281,103 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
     snapshotId: snapshot.id,
     signalCount: snapshot.signals.length,
   });
+  meshTell({
+    conversation: meshConversation,
+    from: 'brain.reporting',
+    to: ['brain.evaluation', 'brain.research.source'],
+    op: 'research.snapshot.persisted',
+    body: {
+      snapshotId: snapshot.id,
+      signalCount: snapshot.signals.length,
+      top: snapshot.signals.slice(0, 5).map((signal) => ({ symbol: signal.symbol, score: signal.localAiScore })),
+    },
+    userId,
+    researchRunId,
+  });
 
   logger.info('Autonomous research complete', { userId, snapshotId: snapshot.id, signalCount: scored.length });
   return snapshot;
+}
+
+async function expandEntityLeadsWithFinnhub({ userId, entityLeads = [], onEvent }) {
+  const finnhubCredentials = userId ? providerCredentialRepo.getSecret(userId, 'finnhub') : null;
+  const apiKey = finnhubCredentials?.apiKey || config.finnhubApiKey;
+  if (!apiKey || !entityLeads.length) {
+    if (entityLeads.length) {
+      emit(onEvent, 'entity-expansion', 33, 'warn', 'Crawled entity leads found, but Finnhub search is unavailable; retaining direct ticker leads only.', {
+        entityLeads: entityLeads.slice(0, 10).map((lead) => ({ name: lead.name, symbol: lead.symbol, score: lead.score })),
+      });
+    }
+    return entityLeads
+      .filter((lead) => lead.symbol)
+      .map((lead) => entityLeadToCandidate(lead, lead.symbol, lead.name));
+  }
+
+  const expanded = [];
+  const searchable = entityLeads
+    .filter((lead) => lead.name && !lead.symbol)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 24);
+  for (const lead of searchable) {
+    try {
+      const matches = await finnhub.searchSymbol(lead.name, { apiKey });
+      const match = matches.find((item) => item.type === 'Common Stock' && /^[A-Z.]{1,7}$/.test(item.symbol)) || matches.find((item) => /^[A-Z.]{1,7}$/.test(item.symbol));
+      if (!match) continue;
+      expanded.push(entityLeadToCandidate(lead, match.symbol, match.description || lead.name));
+    } catch (err) {
+      emit(onEvent, 'entity-expansion', 34, 'warn', 'Finnhub symbol search failed for crawled entity lead.', {
+        entity: lead.name,
+        error: err.message,
+      });
+    }
+  }
+  for (const lead of entityLeads.filter((item) => item.symbol).slice(0, 24)) {
+    expanded.push(entityLeadToCandidate(lead, lead.symbol, lead.name));
+  }
+  emit(onEvent, 'entity-expansion', 35, 'debug', 'Expanded crawled entity leads into quoteable company candidates.', {
+    entityLeads: entityLeads.length,
+    expanded: expanded.slice(0, 12).map((item) => ({ symbol: item.symbol, companyName: item.companyName, score: item.themeHits })),
+  });
+  return expanded;
+}
+
+function entityLeadToCandidate(lead, symbol, companyName) {
+  return {
+    symbol: String(symbol || '').toUpperCase(),
+    companyName: companyName || lead.name || symbol,
+    theme: 'crawled-entity-expansion',
+    themeHits: Math.max(2.2, Number(lead.score || 0)),
+    discovery: {
+      method: lead.symbol ? 'crawled-direct-ticker' : 'crawled-entity-finnhub-search',
+      tags: ['entity-lead', lead.type || 'company'],
+      evidence: (lead.evidence || []).slice(0, 5).map((item) => ({
+        title: item.title,
+        url: item.url,
+        reason: `${item.reason}; mapped to ${symbol}`,
+      })),
+    },
+    evidence: (lead.evidence || []).map((item) => item.reason).slice(0, 5),
+  };
+}
+
+function mergeDiscoveredCompanies(...lists) {
+  const map = new Map();
+  for (const item of lists.flat()) {
+    if (!item?.symbol) continue;
+    const symbol = item.symbol.toUpperCase();
+    const existing = map.get(symbol);
+    if (!existing) {
+      map.set(symbol, { ...item, symbol });
+      continue;
+    }
+    existing.themeHits = Math.max(existing.themeHits || 0, item.themeHits || 0);
+    existing.theme = existing.theme === item.theme ? existing.theme : `${existing.theme}+${item.theme}`;
+    existing.discovery = existing.discovery || item.discovery;
+    if (existing.discovery && item.discovery?.evidence) {
+      existing.discovery.evidence = [...(existing.discovery.evidence || []), ...item.discovery.evidence].slice(0, 8);
+    }
+  }
+  return [...map.values()].sort((a, b) => (b.themeHits || 0) - (a.themeHits || 0));
 }
 
 async function collectQuotes(symbols, { userId, onEvent }) {
@@ -423,7 +630,14 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
       jsonDatasets: datasetIntel.normalized,
     };
     const output = net.run(input);
-    const localAiScore = Number(((output.score || output[0] || 0) * 100).toFixed(1));
+    const brainNetScore01 = clamp01(output.score || output[0] || 0);
+    const ensemble = ensembleService.scoreEnsemble({
+      userId,
+      input,
+      brainNetScore01,
+      trainingData: CANDIDATE_SCORER_TRAINING_DATA,
+    });
+    const localAiScore = Number((ensemble.combined * 100).toFixed(1));
     const actionBias = localAiScore >= 66 && changePct > -2 ? 'buy-candidate' : localAiScore <= 36 ? 'sell-or-avoid' : 'hold-watch';
     scored.push({
       symbol: candidate.symbol,
@@ -433,6 +647,7 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
       momentum: changePct > 1 ? 'bullish' : changePct < -1 ? 'bearish' : 'neutral',
       actionBias,
       localAiScore,
+      ensembleMemberScores: ensemble.memberScores,
       theme: candidate.theme,
       themeHits: candidate.themeHits,
       discovery: candidate.discovery || null,
@@ -502,6 +717,19 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
   return scored.sort((a, b) => b.localAiScore - a.localAiScore).slice(0, 12);
 }
 
+// Shared seed training set for both the brain.js net and the logistic
+// regression ensemble member, so they're two independently-fit models over
+// the same labeled feature space rather than one model wearing two hats.
+const CANDIDATE_SCORER_TRAINING_DATA = [
+  { input: { momentum: 0.9, volatility: 0.25, news: 0.85, theme: 0.8, macroRisk: 0.15, consumer: 0.8, brokerFactors: 0.9, investorPlaybook: 0.9, jsonDatasets: 0.85 }, output: { score: 0.95 } },
+  { input: { momentum: 0.75, volatility: 0.35, news: 0.65, theme: 0.55, macroRisk: 0.35, consumer: 0.6, brokerFactors: 0.75, investorPlaybook: 0.78, jsonDatasets: 0.72 }, output: { score: 0.78 } },
+  { input: { momentum: 0.55, volatility: 0.45, news: 0.5, theme: 0.35, macroRisk: 0.45, consumer: 0.5, brokerFactors: 0.55, investorPlaybook: 0.55, jsonDatasets: 0.5 }, output: { score: 0.52 } },
+  { input: { momentum: 0.25, volatility: 0.8, news: 0.25, theme: 0.2, macroRisk: 0.75, consumer: 0.35, brokerFactors: 0.25, investorPlaybook: 0.24, jsonDatasets: 0.22 }, output: { score: 0.13 } },
+  { input: { momentum: 0.75, volatility: 0.9, news: 0.4, theme: 0.4, macroRisk: 0.8, consumer: 0.4, brokerFactors: 0.35, investorPlaybook: 0.34, jsonDatasets: 0.3 }, output: { score: 0.27 } },
+  { input: { momentum: 0.35, volatility: 0.2, news: 0.7, theme: 0.65, macroRisk: 0.25, consumer: 0.75, brokerFactors: 0.7, investorPlaybook: 0.74, jsonDatasets: 0.76 }, output: { score: 0.68 } },
+  { input: { momentum: 0.65, volatility: 0.3, news: 0.45, theme: 0.35, macroRisk: 0.4, consumer: 0.45, brokerFactors: 0.85, investorPlaybook: 0.82, jsonDatasets: 0.7 }, output: { score: 0.72 } },
+];
+
 function buildBrainScorer(userId) {
   return brainModelService.loadOrTrain({
     userId,
@@ -513,15 +741,7 @@ function buildBrainScorer(userId) {
       exportedFormat: 'brain.js toJSON',
       inputFeatures: ['momentum', 'volatility', 'news', 'theme', 'macroRisk', 'consumer', 'brokerFactors', 'investorPlaybook', 'jsonDatasets'],
     },
-    trainingData: [
-      { input: { momentum: 0.9, volatility: 0.25, news: 0.85, theme: 0.8, macroRisk: 0.15, consumer: 0.8, brokerFactors: 0.9, investorPlaybook: 0.9, jsonDatasets: 0.85 }, output: { score: 0.95 } },
-      { input: { momentum: 0.75, volatility: 0.35, news: 0.65, theme: 0.55, macroRisk: 0.35, consumer: 0.6, brokerFactors: 0.75, investorPlaybook: 0.78, jsonDatasets: 0.72 }, output: { score: 0.78 } },
-      { input: { momentum: 0.55, volatility: 0.45, news: 0.5, theme: 0.35, macroRisk: 0.45, consumer: 0.5, brokerFactors: 0.55, investorPlaybook: 0.55, jsonDatasets: 0.5 }, output: { score: 0.52 } },
-      { input: { momentum: 0.25, volatility: 0.8, news: 0.25, theme: 0.2, macroRisk: 0.75, consumer: 0.35, brokerFactors: 0.25, investorPlaybook: 0.24, jsonDatasets: 0.22 }, output: { score: 0.13 } },
-      { input: { momentum: 0.75, volatility: 0.9, news: 0.4, theme: 0.4, macroRisk: 0.8, consumer: 0.4, brokerFactors: 0.35, investorPlaybook: 0.34, jsonDatasets: 0.3 }, output: { score: 0.27 } },
-      { input: { momentum: 0.35, volatility: 0.2, news: 0.7, theme: 0.65, macroRisk: 0.25, consumer: 0.75, brokerFactors: 0.7, investorPlaybook: 0.74, jsonDatasets: 0.76 }, output: { score: 0.68 } },
-      { input: { momentum: 0.65, volatility: 0.3, news: 0.45, theme: 0.35, macroRisk: 0.4, consumer: 0.45, brokerFactors: 0.85, investorPlaybook: 0.82, jsonDatasets: 0.7 }, output: { score: 0.72 } },
-    ],
+    trainingData: CANDIDATE_SCORER_TRAINING_DATA,
   });
 }
 
@@ -632,6 +852,24 @@ function clamp01(value) {
 
 function emit(onEvent, phase, progress, level, message, data) {
   onEvent({ phase, progress, level, message, data });
+}
+
+function meshTell({ conversation, from, to, op, body, userId, researchRunId }) {
+  try {
+    brainMesh.tell({
+      from,
+      to,
+      kind: 'event',
+      op,
+      body,
+      ctx: { userId, researchRunId },
+      conv: conversation.id,
+      trace: conversation.metadata?.trace,
+      qos: { durable: true, priority: 'normal' },
+    });
+  } catch (err) {
+    logger.warn('BrainMesh event failed', { op, error: err.message });
+  }
 }
 
 module.exports = {

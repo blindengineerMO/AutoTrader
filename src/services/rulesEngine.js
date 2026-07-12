@@ -1,6 +1,7 @@
 const settingsRepo = require('../db/repositories/settingsRepo');
 const orderRepo = require('../db/repositories/orderRepo');
 const pnlRepo = require('../db/repositories/pnlRepo');
+const alertingService = require('./alertingService');
 const logger = require('../utils/logger');
 const { startOfTodayUtc } = require('../utils/time');
 
@@ -17,6 +18,15 @@ function checkTradeAllowed({ userId, symbol, side, estimatedUsd }) {
 
   if (settings.kill_switch_engaged) {
     return { allowed: false, reason: 'Kill switch is engaged' };
+  }
+
+  for (const switchName of settingsRepo.AUTO_KILL_SWITCHES) {
+    if (settings[`${switchName}_engaged`]) {
+      return {
+        allowed: false,
+        reason: `${switchName} is engaged: ${settings[`${switchName}_reason`] || 'no reason recorded'}`,
+      };
+    }
   }
 
   if (!settings.trading_enabled) {
@@ -48,7 +58,9 @@ function checkTradeAllowed({ userId, symbol, side, estimatedUsd }) {
 
 function engageKillSwitch(userId, triggeredBy, reason) {
   logger.warn('Kill switch engaged', { userId, triggeredBy, reason });
-  return settingsRepo.setKillSwitch(userId, true, triggeredBy, reason);
+  const result = settingsRepo.setKillSwitch(userId, true, triggeredBy, reason);
+  alertingService.alertKillSwitch({ userId, switchName: 'kill_switch_engaged', reason: reason || `Triggered by ${triggeredBy}` });
+  return result;
 }
 
 function releaseKillSwitch(userId, triggeredBy, reason) {

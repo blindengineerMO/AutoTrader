@@ -151,6 +151,7 @@ function scanEtfProxies(document, candidateMap) {
 }
 
 function scanTickerMentions(document, candidateMap) {
+  const tickerBlacklist = new Set(['CEO', 'CFO', 'COO', 'SEC', 'IPO', 'ETF', 'USA', 'USD', 'AI', 'EV', 'GDP', 'CPI', 'FED']);
   const patterns = [
     /\$([A-Z]{1,5})\b/g,
     /\(([A-Z]{1,5})\)/g,
@@ -159,14 +160,14 @@ function scanTickerMentions(document, candidateMap) {
   for (const pattern of patterns) {
     for (const match of document.text.matchAll(pattern)) {
       const symbol = match[1];
-      if (!SYMBOL_WHITELIST.has(symbol)) continue;
+      if (tickerBlacklist.has(symbol)) continue;
       const profile = COMPANY_PROFILES.find((item) => item.symbol === symbol) || ETF_PROXIES.find((item) => item.symbol === symbol);
       addCandidate(candidateMap, {
         symbol,
         companyName: profile?.companyName || symbol,
-        score: document.weight * 2.5,
+        score: document.weight * (SYMBOL_WHITELIST.has(symbol) ? 2.5 : 2.2),
         tags: profile?.tags || ['direct-ticker'],
-        reason: `Crawled ${document.sourceType} included direct ticker mention ${symbol}.`,
+        reason: `Crawled ${document.sourceType} included ${SYMBOL_WHITELIST.has(symbol) ? 'known' : 'new'} direct ticker mention ${symbol}.`,
         url: document.url,
         title: document.title,
       });

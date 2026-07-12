@@ -13,3 +13,9 @@ playwright-report/
 tests/tmp-*.db*
 storage/
 tmp/
+Agents/
+PLAN*.md
+SOURCES.md
+SPEC.md
+DECISION.md
+PROJECT.md

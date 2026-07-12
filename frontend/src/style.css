@@ -332,6 +332,23 @@ body::after {
   clip-path: polygon(0 7px, 7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%);
 }
 
+.hud-chip-button {
+  cursor: pointer;
+  transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.hud-chip-button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(39, 215, 255, 0.44);
+  box-shadow: 0 0 22px rgba(39, 215, 255, 0.18);
+}
+
+.hud-chip-button:active {
+  transform: translateY(1px);
+  background: rgba(10, 92, 160, 0.2);
+  box-shadow: none;
+}
+
 .glass-panel:hover {
   transform: scale(1.012) translateY(-2px);
   border-color: rgba(39, 215, 255, 0.38);
@@ -512,6 +529,152 @@ body::after {
   align-items: end;
 }
 
+.agents-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
+  gap: 22px;
+  align-items: end;
+}
+
+.agents-workspace {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.95fr) minmax(0, 1.05fr);
+  gap: 18px;
+}
+
+.agent-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.agent-persona-card {
+  min-height: 184px;
+  padding: 14px;
+  color: rgba(237, 247, 255, 0.78);
+  text-align: left;
+  transition: transform 150ms ease, box-shadow 150ms ease, border-color 150ms ease;
+}
+
+.agent-persona-card:hover,
+.agent-persona-card.active {
+  transform: translateY(-2px);
+  border-color: rgba(39, 215, 255, 0.34);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.36), 0 0 26px rgba(39, 215, 255, 0.14);
+}
+
+.agent-action-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.danger-toggle {
+  border-color: rgba(255, 90, 122, 0.24);
+  color: rgba(255, 142, 164, 0.9);
+}
+
+.workspace-path {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  color: rgba(237, 247, 255, 0.56);
+  font-size: 0.74rem;
+}
+
+.workspace-path span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-edit-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 190px;
+  gap: 12px;
+}
+
+.agent-research-terminal {
+  top: 108px;
+  right: 28px;
+  bottom: auto;
+  width: min(760px, calc(100vw - 40px));
+  max-height: min(620px, calc(100vh - 130px));
+  z-index: 85;
+  resize: both;
+  overflow: hidden;
+}
+
+.movable-head {
+  cursor: grab;
+  user-select: none;
+}
+
+.movable-head:active {
+  cursor: grabbing;
+}
+
+.agent-bias-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.bias-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bias-list div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding-bottom: 7px;
+  border-bottom: 1px solid rgba(39, 215, 255, 0.06);
+  color: rgba(237, 247, 255, 0.62);
+  font-size: 0.78rem;
+}
+
+.bias-list span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.bias-list strong {
+  color: #27d7ff;
+  font-family: 'Space Mono', monospace;
+  font-size: 0.74rem;
+}
+
+.consensus-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.consensus-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 54px;
+  align-items: center;
+  gap: 12px;
+  min-height: 72px;
+  padding: 10px 12px;
+}
+
+.consensus-row small {
+  display: block;
+  color: rgba(237, 247, 255, 0.38);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
 .research-command {
   padding: 18px;
   border-color: rgba(39, 215, 255, 0.24);
@@ -551,6 +714,129 @@ body::after {
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.38), 0 0 28px rgba(39, 215, 255, 0.16);
 }
 
+.candidate-split-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.candidate-panel {
+  padding: 14px;
+  min-height: 250px;
+  border-color: rgba(39, 215, 255, 0.18);
+}
+
+.candidate-panel.danger-panel {
+  border-color: rgba(255, 90, 122, 0.18);
+}
+
+.candidate-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+  color: rgba(237, 247, 255, 0.72);
+  font-family: 'Space Mono', monospace;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.candidate-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.candidate-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 0;
+  border-top: 1px solid rgba(237, 247, 255, 0.08);
+}
+
+.candidate-row strong,
+.candidate-row span {
+  display: block;
+}
+
+.candidate-row small {
+  display: block;
+  color: rgba(237, 247, 255, 0.4);
+  font-size: 0.7rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.clickable-row {
+  width: 100%;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.clickable-row:hover {
+  border-top-color: rgba(39, 215, 255, 0.32);
+}
+
+.spec-drill-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr minmax(260px, 1.2fr);
+  gap: 12px;
+}
+
+.spec-drill-grid .candidate-panel {
+  min-height: 184px;
+}
+
+.spec-detail-panel {
+  overflow: hidden;
+}
+
+.spec-detail-lines {
+  display: grid;
+  gap: 8px;
+  max-height: 210px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.spec-detail-line {
+  display: grid;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(237, 247, 255, 0.08);
+}
+
+.spec-detail-line strong {
+  color: rgba(237, 247, 255, 0.52);
+  font-family: 'Space Mono', monospace;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+}
+
+.spec-detail-line code {
+  color: rgba(109, 225, 255, 0.78);
+  font-size: 0.72rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.company-ledger-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-height: 114px;
+  overflow: auto;
+}
+
+.gl-table td {
+  vertical-align: top;
+}
+
 .score-ring {
   width: 54px;
   aspect-ratio: 1;
@@ -588,6 +874,34 @@ body::after {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.source-memory-controls {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.3fr) minmax(120px, 0.55fr) minmax(120px, 0.55fr) minmax(140px, 0.65fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+}
+
+.source-memory-summary,
+.source-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  color: rgba(237, 247, 255, 0.48);
+  font-family: 'Space Mono', monospace;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.source-pagination {
+  justify-content: flex-end;
+}
+
+.source-page-size {
+  max-width: 118px;
 }
 
 .source-memory-row,
@@ -1309,16 +1623,22 @@ body::after {
 
 @media (max-width: 1024px) {
   .research-hero,
+  .agents-hero,
   .workspace-hero {
     grid-template-columns: 1fr;
   }
 
-  .candidate-grid {
+  .candidate-grid,
+  .candidate-split-grid,
+  .spec-drill-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .workspace-metric-grid,
-  .context-grid {
+  .context-grid,
+  .agents-workspace,
+  .agent-bias-grid,
+  .agent-edit-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1385,12 +1705,19 @@ body::after {
   }
 
   .candidate-grid,
+  .candidate-split-grid,
+  .spec-drill-grid,
+  .agent-card-grid,
   .plan-action-grid,
   .decision-report-grid,
   .workspace-metric-grid,
   .context-grid,
   .factor-grid,
-  .source-admin-grid {
+  .source-admin-grid,
+  .source-memory-controls,
+  .agents-workspace,
+  .agent-bias-grid,
+  .agent-edit-grid {
     grid-template-columns: 1fr;
   }
 

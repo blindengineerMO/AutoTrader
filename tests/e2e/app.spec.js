@@ -38,7 +38,7 @@ test.describe('AutoTrader UI', () => {
 
   test('navigate to Research view and trigger research-only run', async ({ page }) => {
     await registerAndLogin(page);
-    await page.getByRole('link', { name: 'Research & Strategy' }).click();
+    await page.getByRole('link', { name: 'Research' }).click();
     await expect(page).toHaveURL('/research');
 
     await page.getByRole('button', { name: 'Run research only' }).click();

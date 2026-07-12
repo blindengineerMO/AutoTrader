@@ -38,9 +38,22 @@ const config = {
     publicUrl: process.env.DUCK_AI_PUBLIC_URL || 'https://duck.ai/',
     sanctionedEndpoint: process.env.DUCK_AI_SANCTIONED_ENDPOINT || '',
     model: process.env.DUCK_AI_MODEL || '',
+    browserEnabled: bool(process.env.DUCK_AI_BROWSER_ENABLED, true),
+    browserHeadless: bool(process.env.DUCK_AI_BROWSER_HEADLESS, true),
+    browserTimeoutMs: num(process.env.DUCK_AI_BROWSER_TIMEOUT_MS, 45000),
+    sessionDir: process.env.DUCK_AI_SESSION_DIR || require('path').join(require('os').tmpdir(), 'autotrader-duck-ai-session'),
   },
 
   finnhubApiKey: process.env.FINNHUB_API_KEY || '',
+
+  secEdgarUserAgent: process.env.SEC_EDGAR_USER_AGENT || '',
+
+  alerting: {
+    webhookUrl: process.env.ALERT_WEBHOOK_URL || '',
+    emailTo: process.env.ALERT_EMAIL_TO || '',
+    emailFrom: process.env.ALERT_EMAIL_FROM || '',
+    smtpUrl: process.env.ALERT_SMTP_URL || '',
+  },
 
   robinhood: {
     username: process.env.ROBINHOOD_USERNAME || '',

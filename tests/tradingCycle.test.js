@@ -28,6 +28,7 @@ const settingsRepo = require('../src/db/repositories/settingsRepo');
 const positionRepo = require('../src/db/repositories/positionRepo');
 const orderRepo = require('../src/db/repositories/orderRepo');
 const pnlRepo = require('../src/db/repositories/pnlRepo');
+const glLedgerRepo = require('../src/db/repositories/glLedgerRepo');
 const researchRepo = require('../src/db/repositories/researchRepo');
 const decisionReportRepo = require('../src/db/repositories/decisionReportRepo');
 const MockBrokerClient = require('../src/services/broker/MockBrokerClient');
@@ -85,6 +86,12 @@ describe('runTradingCycle (mocked research + AI + broker)', () => {
     expect(orders).toHaveLength(1);
     expect(orders[0].status).toBe('filled');
 
+    const glEntries = glLedgerRepo.listByCompany(userId, 'NVDA', 10);
+    expect(glEntries).toHaveLength(2);
+    expect(glEntries.map((entry) => entry.account_code)).toEqual(expect.arrayContaining(['1000', '1200-NVDA']));
+    expect(glEntries.reduce((sum, entry) => sum + entry.debit, 0)).toBe(100);
+    expect(glEntries.reduce((sum, entry) => sum + entry.credit, 0)).toBe(100);
+
     const accountState = await broker.getAccountState();
     expect(accountState.cashUsd).toBe(0); // 100 cash - 1 * $100 fill price
   });
@@ -122,9 +129,57 @@ describe('runTradingCycle (mocked research + AI + broker)', () => {
     expect(plan.execution_mode).toBe('simulation');
     expect(plan.actions.find((a) => a.symbol === 'NVDA').status).toBe('simulated_would_buy');
     expect(orderRepo.listByUser(simUser.id, 10)).toHaveLength(0);
+    expect(glLedgerRepo.listByCompany(simUser.id, 'NVDA', 10).map((entry) => entry.source_type)).toEqual(['simulation', 'simulation']);
 
     const [report] = decisionReportRepo.listByUser(simUser.id, 1);
     expect(report.mode).toBe('simulation');
     expect(report.summary.actions[0].evidence.momentum).toBe('bullish');
+  });
+
+  it('trips broker_connection_kill_switch and falls back to simulation when broker.getAccountState() throws', async () => {
+    const brokerUser = userRepo.createUser({
+      email: `cycle-broker-fail-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+    settingsRepo.update(brokerUser.id, { tradingEnabled: 1 });
+
+    const brokenBroker = { live: true, getAccountState: async () => { throw new Error('connection refused'); } };
+    const plan = await runTradingCycle({
+      userId: brokerUser.id,
+      broker: brokenBroker,
+      runResearchCycle: stubRunResearchCycleFactory,
+      generatePlan: stubGeneratePlan,
+      executionMode: 'auto',
+    });
+
+    expect(plan.execution_mode).toBe('simulation');
+    const settings = settingsRepo.get(brokerUser.id);
+    expect(settings.broker_connection_kill_switch_engaged).toBe(1);
+    expect(settings.broker_connection_kill_switch_reason).toContain('connection refused');
+  });
+
+  it('trips automatic_strategy_kill_switch when an unattended auto-mode cycle throws', async () => {
+    const failUser = userRepo.createUser({
+      email: `cycle-auto-fail-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+
+    const throwingResearchCycle = async () => { throw new Error('research pipeline exploded'); };
+
+    await expect(runTradingCycle({
+      userId: failUser.id,
+      broker: new MockBrokerClient({ startingCashUsd: 100 }),
+      runResearchCycle: throwingResearchCycle,
+      generatePlan: stubGeneratePlan,
+      executionMode: 'auto',
+    })).rejects.toThrow('research pipeline exploded');
+
+    const settings = settingsRepo.get(failUser.id);
+    expect(settings.automatic_strategy_kill_switch_engaged).toBe(1);
+    expect(settings.automatic_strategy_kill_switch_reason).toContain('research pipeline exploded');
   });
 });

@@ -1,9 +1,14 @@
 const researchSourceRepo = require('../db/repositories/researchSourceRepo');
 const settingsRepo = require('../db/repositories/settingsRepo');
 const crawleeResearchCrawler = require('./crawleeResearchCrawlerService');
+const {
+  SPEC_DISCOVERY_QUERIES,
+  SPEC_RELEVANCE_TERMS,
+  toResearchSeedSources,
+} = require('./spec/specDataSourceCatalog');
 const logger = require('../utils/logger');
 
-const SEED_SOURCES = [
+const BASE_SEED_SOURCES = [
   {
     url: 'https://library.bu.edu/bizdata/free-data',
     title: 'Boston University Free Business Data Resources',
@@ -40,12 +45,15 @@ const SEED_SOURCES = [
   { url: 'https://www.commoncrawl.org/', title: 'Common Crawl', tags: ['web-index', 'discovery'], credibilityScore: 70 },
 ];
 
+const SEED_SOURCES = dedupeSources([...BASE_SEED_SOURCES, ...toResearchSeedSources()]);
+
 const DISCOVERY_QUERIES = [
   'Whats in the news today',
   'free macro market data sources investment research',
   'US retail sales consumer spending data free',
   'global economic data market indicators free',
   'stock market sector news earnings macro data free',
+  ...SPEC_DISCOVERY_QUERIES,
 ];
 
 const RELEVANCE_TERMS = [
@@ -66,6 +74,7 @@ const RELEVANCE_TERMS = [
   'commodities',
   'financial',
   'data',
+  ...SPEC_RELEVANCE_TERMS,
 ];
 
 async function seedSources(userId) {
@@ -138,9 +147,10 @@ async function collectLearnedResearch({ userId, researchRunId, onEvent = () => {
   emit(onEvent, 'source-learning', 22, 'debug', 'Self-learned source scan complete.', {
     scraped: observations.length,
     discovered: discovered.length,
+    entityLeads: crawleeResult.entityLeads?.length || 0,
   });
 
-  return { observations, learnedSources: researchSourceRepo.listActiveByUser(userId, 30), discovered };
+  return { observations, learnedSources: researchSourceRepo.listActiveByUser(userId, 60), discovered, entityLeads: crawleeResult.entityLeads || [] };
 }
 
 async function runCrawleeResearchDiscovery({ userId, researchRunId, onEvent }) {
@@ -149,9 +159,12 @@ async function runCrawleeResearchDiscovery({ userId, researchRunId, onEvent }) {
     queries: DISCOVERY_QUERIES,
     seedSources,
     onEvent,
-    maxFollowUps: 12,
-    maxRequests: 34,
-    minContinuationScore: 2.75,
+    maxFollowUps: 24,
+    maxRequests: 180,
+    minContinuationScore: 1.75,
+    maxWaves: 10,
+    maxSearchExpansions: 60,
+    maxRuntimeMs: 8 * 60 * 1000,
   });
 
   const observations = [];
@@ -241,7 +254,7 @@ async function runCrawleeResearchDiscovery({ userId, researchRunId, onEvent }) {
     });
   }
 
-  return { observations, discovered: crawl.discovered };
+  return { observations, discovered: crawl.discovered, entityLeads: crawl.entityLeads || [] };
 }
 
 async function discoverSources(userId, onEvent) {
@@ -457,6 +470,15 @@ function hostnameTitle(url) {
 function emit(onEvent, phase, progress, level, message, data) {
   onEvent({ phase, progress, level, message, data });
   if (level === 'warn') logger.warn(message, data || {});
+}
+
+function dedupeSources(sources) {
+  const seen = new Set();
+  return sources.filter((source) => {
+    if (!source.url || seen.has(source.url)) return false;
+    seen.add(source.url);
+    return true;
+  });
 }
 
 module.exports = {

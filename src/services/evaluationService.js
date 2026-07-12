@@ -5,7 +5,15 @@ const decisionReportRepo = require('../db/repositories/decisionReportRepo');
 const evaluationReportRepo = require('../db/repositories/evaluationReportRepo');
 const researchSourceRepo = require('../db/repositories/researchSourceRepo');
 const webScrapeClient = require('./marketData/webScrapeClient');
+const ensembleService = require('./models/ensembleService');
+const settingsRepo = require('../db/repositories/settingsRepo');
+const agentLearningService = require('./agentLearningService');
+const alertingService = require('./alertingService');
 const logger = require('../utils/logger');
+
+const MIN_ACTIONS_FOR_DRIFT_CHECK = 5;
+const MIN_PRIOR_REPORTS_FOR_DRIFT_CHECK = 2;
+const DRIFT_ACCURACY_DROP_THRESHOLD_PCT = 25;
 
 async function runDailyEvaluation({ userId, reportDate = todayIsoDate(), periodStart, periodEnd } = {}) {
   const end = periodEnd ? new Date(periodEnd) : new Date();
@@ -27,7 +35,10 @@ async function runDailyEvaluation({ userId, reportDate = todayIsoDate(), periodS
   }
 
   const summary = summarizeEvaluations({ evaluations, start, end });
+  checkModelDrift(userId, summary);
   updateSourceScores(userId, evaluations, summary);
+  updateEnsembleWeights(userId, evaluations);
+  agentLearningService.updateAgentWeightsFromEvaluations(userId, evaluations);
 
   const evaluationReport = evaluationReportRepo.create({
     userId,
@@ -65,6 +76,7 @@ function evaluatePlan({ report, plan, snapshot, quoteBySymbol }) {
       returnPct: Number(returnPct.toFixed(2)),
       outcome,
       localAiScore: signal?.localAiScore,
+      ensembleMemberScores: signal?.ensembleMemberScores || null,
       sourceEvidence: signal?.evidence?.explanation || [],
     };
   });
@@ -179,6 +191,58 @@ function updateSourceScores(userId, evaluations, summary) {
   }
 }
 
+/**
+ * Auto-trips the model-drift kill switch when today's realized accuracy
+ * falls sharply below the recent rolling baseline, rather than letting a
+ * silently-degrading model keep trading. Requires enough sample size in both
+ * today's window and the baseline to avoid tripping on noise.
+ */
+function checkModelDrift(userId, summary) {
+  if (summary.evaluatedActions < MIN_ACTIONS_FOR_DRIFT_CHECK) return;
+
+  const priorReports = evaluationReportRepo
+    .listByUser(userId, 10)
+    .filter((report) => (report.summary?.evaluatedActions || 0) >= MIN_ACTIONS_FOR_DRIFT_CHECK);
+  if (priorReports.length < MIN_PRIOR_REPORTS_FOR_DRIFT_CHECK) return;
+
+  const baselineAccuracy =
+    priorReports.reduce((sum, report) => sum + (report.summary?.accuracy || 0), 0) / priorReports.length;
+  const drop = baselineAccuracy - summary.accuracy;
+  if (drop >= DRIFT_ACCURACY_DROP_THRESHOLD_PCT) {
+    settingsRepo.engageAutoKillSwitch(
+      userId,
+      'model_drift_kill_switch',
+      `Accuracy dropped ${drop.toFixed(1)} points below the ${priorReports.length}-report rolling baseline (${baselineAccuracy.toFixed(1)}% -> ${summary.accuracy.toFixed(1)}%).`
+    );
+    alertingService.alertModelDrift({ userId, drop, baselineAccuracy, currentAccuracy: summary.accuracy });
+  }
+}
+
+/**
+ * Recomputes ensemble combination weights from realized accuracy: for each
+ * member (brainNet, logisticRegression, heuristic), correlates its
+ * historical prediction with the actually observed return, so higher-skill
+ * members get more weight next cycle (SPEC.md §7) instead of a fixed split.
+ */
+function updateEnsembleWeights(userId, evaluations) {
+  const scoredActions = evaluations
+    .flatMap((evaluation) => evaluation.actionEvaluations)
+    .filter((action) => action.ensembleMemberScores);
+  if (scoredActions.length < 2) return;
+
+  const members = Object.keys(scoredActions[0].ensembleMemberScores);
+  const icByMember = {};
+  for (const member of members) {
+    const predictions = scoredActions.map((action) => action.ensembleMemberScores[member]);
+    const outcomes = scoredActions.map((action) => action.returnPct);
+    icByMember[member] = ensembleService.computeInformationCoefficient(predictions, outcomes);
+  }
+
+  const weights = ensembleService.computeWeightsFromIc(icByMember);
+  ensembleService.saveWeights({ userId, weights, icByMember });
+  logger.info('Ensemble weights recomputed from realized evaluation outcomes', { userId, weights, icByMember });
+}
+
 function classifyOutcome(action, returnPct) {
   if (action === 'buy') return returnPct > 0 ? 'correct' : 'incorrect';
   if (action === 'sell') return returnPct < 0 ? 'correct' : 'incorrect';
@@ -203,4 +267,6 @@ module.exports = {
   runDailyEvaluation,
   evaluatePlan,
   summarizeEvaluations,
+  updateEnsembleWeights,
+  checkModelDrift,
 };

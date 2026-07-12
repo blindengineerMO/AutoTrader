@@ -30,6 +30,18 @@ const listByUserStmt = db.prepare(`
   LIMIT ?
 `);
 
+const SORT_COLUMNS = {
+  updated_at: 'updated_at',
+  relevance_score: 'relevance_score',
+  credibility_score: 'credibility_score',
+  failure_count: 'failure_count',
+  success_count: 'success_count',
+  title: 'title',
+  url: 'url',
+  status: 'status',
+  source_type: 'source_type',
+};
+
 const activeByUserStmt = db.prepare(`
   SELECT * FROM research_sources
   WHERE user_id = ? AND status = 'active'
@@ -81,6 +93,62 @@ const insertObservationStmt = db.prepare(`
   )
   VALUES (@userId, @sourceId, @researchRunId, @url, @title, @excerpt, @linksJson, @scoreJson)
 `);
+
+function queryByUser(userId, {
+  page = 1,
+  pageSize = 25,
+  search = '',
+  status = '',
+  sourceType = '',
+  sortBy = 'updated_at',
+  sortDir = 'desc',
+} = {}) {
+  const safePage = Math.max(1, Number(page) || 1);
+  const safePageSize = Math.min(100, Math.max(1, Number(pageSize) || 25));
+  const safeSortBy = SORT_COLUMNS[sortBy] ? sortBy : 'updated_at';
+  const safeSortDir = String(sortDir).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+  const where = ['user_id = @userId'];
+  const params = {
+    userId,
+    limit: safePageSize,
+    offset: (safePage - 1) * safePageSize,
+  };
+
+  if (search) {
+    where.push(`(
+      url LIKE @search OR title LIKE @search OR notes LIKE @search OR
+      tags_json LIKE @search OR discovery_method LIKE @search
+    )`);
+    params.search = `%${search}%`;
+  }
+  if (status) {
+    where.push('status = @status');
+    params.status = status;
+  }
+  if (sourceType) {
+    where.push('source_type = @sourceType');
+    params.sourceType = sourceType;
+  }
+
+  const whereSql = where.join(' AND ');
+  const total = db.prepare(`SELECT COUNT(*) AS count FROM research_sources WHERE ${whereSql}`).get(params).count;
+  const items = db.prepare(`
+    SELECT * FROM research_sources
+    WHERE ${whereSql}
+    ORDER BY ${SORT_COLUMNS[safeSortBy]} ${safeSortDir}, id ${safeSortDir}
+    LIMIT @limit OFFSET @offset
+  `).all(params).map(deserialize);
+
+  return {
+    items,
+    total,
+    page: safePage,
+    pageSize: safePageSize,
+    totalPages: Math.max(1, Math.ceil(total / safePageSize)),
+    sortBy: safeSortBy,
+    sortDir: safeSortDir.toLowerCase(),
+  };
+}
 
 function upsert(source) {
   upsertStmt.run({
@@ -164,6 +232,7 @@ module.exports = {
   getByUrl,
   listByUser: (userId, limit = 100) => listByUserStmt.all(userId, limit).map(deserialize),
   listActiveByUser: (userId, limit = 25) => activeByUserStmt.all(userId, limit).map(deserialize),
+  queryByUser,
   recordObservation,
   updateStats,
 };

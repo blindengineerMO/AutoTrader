@@ -1,5 +1,6 @@
 const chatResearch = require('../src/services/chatResearchService');
 const autonomousResearch = require('../src/services/autonomousResearchService');
+const duckAiWebClient = require('../src/services/duckAiWebClient');
 
 describe('chatResearchService', () => {
   it('normalizes candidate and source hints from chat provider JSON', () => {
@@ -56,5 +57,26 @@ describe('chatResearchService', () => {
     expect(palantir).toBeTruthy();
     expect(palantir.theme).toBe('chat-research');
     expect(palantir.chatResearch.providers).toEqual(['xai-grok']);
+  });
+
+  it('builds Duck.ai web prompts and extracts JSON from webapp text', () => {
+    const prompt = duckAiWebClient.buildDuckAiPrompt({
+      systemPrompt: 'Return market research JSON.',
+      payload: { news: [{ title: 'AI infrastructure demand rises' }] },
+    });
+    const extracted = duckAiWebClient.extractJsonObject([
+      'Duck.ai response',
+      '```json',
+      '{"summary":"ok","candidateHints":[],"sourceHints":[],"riskNotes":[]}',
+      '```',
+    ].join('\n'));
+
+    expect(prompt).toContain('Return only the JSON object');
+    expect(prompt).toContain('AI infrastructure demand rises');
+    expect(JSON.parse(extracted)).toMatchObject({ summary: 'ok' });
+    expect(duckAiWebClient.isResearchResultJson(extracted)).toBe(true);
+    expect(duckAiWebClient.isResearchResultJson('{"task":"prompt echo","news":[]}')).toBe(false);
+    expect(duckAiWebClient.DEFAULT_ALLOWED_HOSTS.has('duck.ai')).toBe(true);
+    expect(duckAiWebClient.DEFAULT_ALLOWED_HOSTS.has('duckduckgo.com')).toBe(true);
   });
 });

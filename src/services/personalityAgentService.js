@@ -1,0 +1,632 @@
+const tradingAgentRepo = require('../db/repositories/tradingAgentRepo');
+const researchRepo = require('../db/repositories/researchRepo');
+const researchSourceRepo = require('../db/repositories/researchSourceRepo');
+const brokerAccountRepo = require('../db/repositories/brokerAccountRepo');
+const positionRepo = require('../db/repositories/positionRepo');
+const brainMesh = require('./brainMeshService');
+const agentWorkspace = require('./agentWorkspaceService');
+const agentResearch = require('./agentResearchService');
+const agentDecisionTree = require('./agentDecisionTreeService');
+
+const DEFAULT_PERSONAS = [
+  {
+    name: 'Bill Gates',
+    slug: 'bill-gates',
+    archetype: 'systems-builder-philanthropic-technologist',
+    summary: 'Long-horizon technology and infrastructure thinker biased toward climate, healthcare, productivity software, platforms, and scalable human-welfare outcomes.',
+    style: ['long-term systems', 'technical due diligence', 'climate and health utility', 'platform durability'],
+    sourceUrls: [
+      'https://www.gatesnotes.com/home/home-page-topic/reader/three-tough-truths-about-climate',
+      'https://www.gatesfoundation.org/ideas/articles/next-chapter',
+      'https://www.breakthroughenergy.org/',
+    ],
+    bias: {
+      sectors: { software: 0.18, climate: 0.18, healthcare: 0.14, energy: 0.12, consumer: -0.03 },
+      factors: { moat: 0.24, longHorizon: 0.24, quality: 0.18, volatilityPenalty: 0.10, momentum: 0.04 },
+      watchSymbols: ['MSFT', 'GOOGL', 'NVDA', 'LLY', 'NVO', 'XLE'],
+    },
+  },
+  {
+    name: 'Donald Trump',
+    slug: 'donald-trump',
+    archetype: 'brand-leverage-real-estate-deal-maker',
+    summary: 'Brand, leverage, real estate, media, hospitality, energy, and deal-flow oriented persona with high appetite for visible catalysts and sentiment shifts.',
+    style: ['brand power', 'deal momentum', 'real assets', 'media attention', 'energy preference'],
+    sourceUrls: [
+      'https://www.trump.com/',
+      'https://www.trump.com/real-estate-portfolio',
+      'https://www.trump.com/golf',
+    ],
+    bias: {
+      sectors: { realEstate: 0.20, energy: 0.16, financials: 0.12, media: 0.12, consumer: 0.08, climate: -0.08 },
+      factors: { momentum: 0.18, sentiment: 0.18, volatilityTolerance: 0.16, moat: 0.08, riskPenalty: -0.04 },
+      watchSymbols: ['XLE', 'XLF', 'DJT', 'DIS', 'MAR', 'HLT'],
+    },
+  },
+  {
+    name: 'Nancy Pelosi',
+    slug: 'nancy-pelosi',
+    archetype: 'policy-aware-large-cap-growth-observer',
+    summary: 'Policy-aware public-market persona biased toward liquid large-cap technology, infrastructure, healthcare, and disclosure-traceable market context.',
+    style: ['policy sensitivity', 'large-cap liquidity', 'technology leadership', 'risk controls', 'disclosure awareness'],
+    sourceUrls: [
+      'https://clerk.house.gov/members/P000197',
+      'https://disclosures-clerk.house.gov/',
+      'https://pelosi.house.gov/',
+    ],
+    bias: {
+      sectors: { software: 0.18, semiconductors: 0.16, healthcare: 0.10, infrastructure: 0.10, defense: 0.08 },
+      factors: { liquidity: 0.22, policyCatalyst: 0.18, moat: 0.16, volatilityPenalty: 0.12, momentum: 0.10 },
+      watchSymbols: ['NVDA', 'MSFT', 'AAPL', 'GOOGL', 'AMZN', 'PANW'],
+    },
+  },
+  {
+    name: 'Jeff Bezos',
+    slug: 'jeff-bezos',
+    archetype: 'day-one-customer-obsessed-platform-builder',
+    summary: 'Customer obsession and long-horizon platform compounding persona biased toward cloud, logistics, marketplaces, space, AI infrastructure, and founder-led reinvestment.',
+    style: ['customer obsession', 'Day 1 thinking', 'cash-flow reinvestment', 'platform scale', 'frontier bets'],
+    sourceUrls: [
+      'https://media.corporate-ir.net/media_files/irol/97/97664/reports/Shareholderletter97.pdf',
+      'https://www.sec.gov/Archives/edgar/data/1018724/000119312513151836/d511111dex991.htm',
+      'https://www.bezosexpeditions.com/',
+    ],
+    bias: {
+      sectors: { cloud: 0.18, ecommerce: 0.16, logistics: 0.14, ai: 0.12, space: 0.10 },
+      factors: { longHorizon: 0.24, customerDemand: 0.20, reinvestment: 0.18, moat: 0.16, shortTermProfitPenalty: -0.04 },
+      watchSymbols: ['AMZN', 'GOOGL', 'MSFT', 'SHOP', 'UBER', 'BA'],
+    },
+  },
+  {
+    name: 'Elon Musk',
+    slug: 'elon-musk',
+    archetype: 'first-principles-frontier-technology-operator',
+    summary: 'First-principles frontier-technology persona biased toward EVs, robotics, AI, space, energy storage, autonomy, and asymmetric high-volatility outcomes.',
+    style: ['first principles', 'vertical integration', 'moonshot risk', 'engineering velocity', 'automation'],
+    sourceUrls: [
+      'https://www.tesla.com/master-plans',
+      'https://www.tesla.com/secret-master-plan',
+      'https://x.ai/',
+      'https://www.spacex.com/',
+    ],
+    bias: {
+      sectors: { ev: 0.18, ai: 0.18, space: 0.16, robotics: 0.14, energy: 0.12, legacyConsumer: -0.06 },
+      factors: { asymmetricUpside: 0.24, technicalCatalyst: 0.22, momentum: 0.18, volatilityTolerance: 0.18, quality: 0.04 },
+      watchSymbols: ['TSLA', 'NVDA', 'AMD', 'GOOGL', 'PLTR', 'XLE'],
+    },
+  },
+];
+
+function ensureDefaultAgents(userId) {
+  return DEFAULT_PERSONAS.map((profile) => {
+    const existing = tradingAgentRepo.getBySlug(userId, profile.slug);
+    if (existing) {
+      const updated = ensureDecisionFramework(existing);
+      agentWorkspace.ensureWorkspace(updated);
+      return updated;
+    }
+    return saveProfile(userId, profile, 'seeded-public-persona');
+  });
+}
+
+function listAgents(userId) {
+  ensureDefaultAgents(userId);
+  return agentWorkspace.syncAgents(tradingAgentRepo.listAgents(userId));
+}
+
+function createAgent(userId, name) {
+  const cleanName = String(name || '').replace(/\s+/g, ' ').trim();
+  if (!cleanName) throw new Error('Agent name is required');
+  const known = DEFAULT_PERSONAS.find((persona) => persona.slug === slugify(cleanName) || persona.name.toLowerCase() === cleanName.toLowerCase());
+  const profile = known || buildGeneratedProfile(cleanName);
+  return saveProfile(userId, profile, known ? 'seeded-public-persona' : 'generated-research-persona');
+}
+
+function createAgentFromProfile(userId, profile, profileSource = 'agent-web-crawled-persona') {
+  if (!profile?.name) throw new Error('Agent profile requires a name');
+  return saveProfile(userId, profile, profileSource);
+}
+
+function startResearchCreateAgent(userId, name) {
+  return agentResearch.startAgentResearchRun({
+    userId,
+    name,
+    createAgent: createAgentFromProfile,
+  });
+}
+
+function getResearchCreateRun(userId, runId) {
+  return agentResearch.getAgentResearchRun(userId, runId);
+}
+
+function updateAgent(userId, id, patch = {}) {
+  const existing = tradingAgentRepo.getAgent(userId, id);
+  if (!existing) throw new Error('Agent not found');
+  const next = tradingAgentRepo.updateAgent(userId, id, {
+    name: cleanText(patch.name) || existing.name,
+    status: ['active', 'paused', 'archived'].includes(patch.status) ? patch.status : existing.status,
+    persona: objectOrExisting(patch.persona, existing.persona),
+    bias: objectOrExisting(patch.bias, existing.bias),
+    sourceUrls: Array.isArray(patch.sourceUrls) ? normalizeUrls(patch.sourceUrls) : existing.sourceUrls,
+    model: objectOrExisting(patch.model, existing.model),
+  });
+  registerMeshAgent(next);
+  persistAgentSources(userId, next);
+  return { ...next, workspace: agentWorkspace.ensureWorkspace(next) };
+}
+
+function deleteAgent(userId, id) {
+  const deleted = tradingAgentRepo.markDeleted(userId, id);
+  if (!deleted) throw new Error('Agent not found');
+  agentWorkspace.markDeleted(deleted);
+  return { ok: true, id: deleted.id, status: deleted.status };
+}
+
+function exportAgent(userId, id) {
+  const agent = tradingAgentRepo.getAgent(userId, id);
+  if (!agent || agent.status === 'deleted') throw new Error('Agent not found');
+  return agentWorkspace.exportWorkspace(agent);
+}
+
+function importAgent(userId, payload) {
+  const spec = payload?.spec || payload;
+  if (!spec?.name) throw new Error('Agent import requires a spec with a name');
+  const slug = spec.slug || slugify(spec.name);
+  const profile = {
+    name: cleanText(spec.name),
+    slug,
+    archetype: spec.persona?.archetype || spec.archetype || 'imported-personality-agent',
+    summary: spec.persona?.summary || spec.summary || 'Imported personality trading agent.',
+    style: Array.isArray(spec.persona?.style) ? spec.persona.style : Array.isArray(spec.style) ? spec.style : ['imported', 'adaptive'],
+    sourceUrls: normalizeUrls(spec.sourceUrls || []),
+    bias: spec.bias || {},
+  };
+  const agent = saveProfile(userId, profile, 'imported-agent-spec');
+  return updateAgent(userId, agent.id, {
+    status: spec.status === 'paused' || spec.status === 'archived' ? spec.status : 'active',
+    persona: {
+      ...agent.persona,
+      ...(spec.persona || {}),
+      profileSource: 'imported-agent-spec',
+    },
+    model: spec.model || agent.model,
+  });
+}
+
+async function runCouncil({ userId, snapshotId = null, onEvent = () => {} } = {}) {
+  const agents = listAgents(userId).filter((agent) => agent.status === 'active');
+  const snapshot = snapshotId ? researchRepo.getByIdForUser(snapshotId, userId) : researchRepo.listByUser(userId, 1)[0];
+  const signals = snapshot?.signals || [];
+  const accountState = brokerAccountRepo.ensureDefault(userId);
+  const positions = positionRepo.listByUser(userId);
+  const decisionContext = { snapshot, signals, positions, accountState };
+  const conversation = brainMesh.startConversation({
+    userId,
+    topic: `agent-council${snapshot?.id ? `:${snapshot.id}` : ''}`,
+    metadata: {
+      snapshotId: snapshot?.id || null,
+      agentCount: agents.length,
+      decisionFrameworkVersion: agentDecisionTree.VERSION,
+    },
+  });
+
+  emit(onEvent, 'agent-council', 52, 'debug', 'Personality agent council opened BrainMesh conversation.', {
+    conversationId: conversation.id,
+    agents: agents.map((agent) => agent.name),
+    snapshotId: snapshot?.id || null,
+  });
+
+  const allRecommendations = [];
+  for (const agent of agents) {
+    registerMeshAgent(agent);
+    persistAgentSources(userId, agent);
+    const recommendations = recommendForAgent(agent, signals, decisionContext);
+    allRecommendations.push(...recommendations);
+    brainMesh.tell({
+      from: agent.brain_id,
+      to: ['brain.model.neural', 'brain.reporting', 'agent.council.moderator'],
+      kind: 'event',
+      op: 'agent.thesis.proposed',
+      ctx: { userId, snapshotId: snapshot?.id || null },
+      conv: conversation.id,
+      trace: conversation.metadata.trace,
+      body: {
+        agent: summarizeAgent(agent),
+        recommendations: recommendations.map(stripRecommendationForFrame),
+      },
+    });
+  }
+
+  const debates = buildDebateRounds(agents, allRecommendations);
+  for (const debate of debates) {
+    brainMesh.tell({
+      from: debate.challengerBrainId,
+      to: [debate.targetBrainId, 'agent.council.moderator'],
+      kind: 'event',
+      op: 'agent.challenge.raised',
+      ctx: { userId, snapshotId: snapshot?.id || null },
+      conv: conversation.id,
+      trace: conversation.metadata.trace,
+      body: debate,
+    });
+  }
+
+  const consensus = buildConsensus(allRecommendations, agents);
+  brainMesh.tell({
+    from: 'agent.council.moderator',
+    to: ['brain.reporting', 'brain.evaluation', 'brain.research.source'],
+    kind: 'event',
+    op: 'agent.consensus.ready',
+    ctx: { userId, snapshotId: snapshot?.id || null },
+    conv: conversation.id,
+    trace: conversation.metadata.trace,
+    body: consensus,
+  });
+
+  const run = tradingAgentRepo.createCouncilRun({
+    userId,
+    researchSnapshotId: snapshot?.id || null,
+    conversationId: conversation.id,
+    status: 'complete',
+    summary: consensus,
+    recommendations: allRecommendations,
+  });
+  for (const recommendation of allRecommendations) {
+    const agent = agents.find((item) => item.id === recommendation.agentId);
+    if (agent) agentWorkspace.recordRecommendation(agent, recommendation, run);
+  }
+
+  emit(onEvent, 'agent-council', 58, 'debug', 'Personality agent council completed consensus run.', {
+    runId: run.id,
+    consensus: consensus.finalRecommendations.slice(0, 5),
+  });
+  return run;
+}
+
+function listCouncilRuns(userId, limit = 20) {
+  return tradingAgentRepo.listCouncilRuns(userId, limit);
+}
+
+function saveProfile(userId, profile, profileSource) {
+  const slug = profile.slug || slugify(profile.name);
+  const brainId = `agent.personality.${slug}`;
+  const agent = tradingAgentRepo.upsertAgent({
+    userId,
+    name: profile.name,
+    slug,
+    status: 'active',
+    brainId,
+    persona: {
+      archetype: profile.archetype,
+      summary: profile.summary,
+      style: profile.style,
+      profileSource,
+      disclaimer: 'This is a simulated investment-style persona based on public sources, not an endorsement or claim about the real person making trades.',
+    },
+    bias: profile.bias,
+    sourceUrls: profile.sourceUrls,
+    model: {
+      modelType: 'personality-bias-v1',
+      createdAt: new Date().toISOString(),
+      promptSeed: `${profile.name} ${profile.archetype} ${profile.style?.join(' ')}`,
+      decisionFrameworkVersion: agentDecisionTree.VERSION,
+      decisionFramework: agentDecisionTree.buildDecisionFramework(profile),
+      ...(profile.model || {}),
+    },
+  });
+  registerMeshAgent(agent);
+  persistAgentSources(userId, agent);
+  return { ...agent, workspace: agentWorkspace.ensureWorkspace(agent) };
+}
+
+function buildGeneratedProfile(name) {
+  const slug = slugify(name);
+  const google = new URL('https://www.google.com/search');
+  google.searchParams.set('q', `${name} investment philosophy business strategy portfolio`);
+  const news = new URL('https://news.google.com/rss/search');
+  news.searchParams.set('q', `${name} company investments strategy market`);
+  news.searchParams.set('hl', 'en-US');
+  news.searchParams.set('gl', 'US');
+  news.searchParams.set('ceid', 'US:en');
+  return {
+    name,
+    slug,
+    archetype: 'self-researched-personality-agent',
+    summary: `${name} agent profile generated from autonomous source discovery. The system will crawl attached search/news URLs and refine the model as evidence is collected.`,
+    style: ['evidence-seeking', 'adaptive', 'debate-ready'],
+    sourceUrls: [google.toString(), news.toString()],
+    bias: {
+      sectors: { software: 0.08, ai: 0.08, financials: 0.04, energy: 0.04 },
+      factors: { evidenceQuality: 0.22, momentum: 0.12, moat: 0.12, riskPenalty: 0.10 },
+      watchSymbols: ['SPY', 'QQQ'],
+    },
+  };
+}
+
+function recommendForAgent(agent, signals, context = {}) {
+  const candidates = signals.length ? signals : fallbackSignals(agent);
+  return candidates
+    .map((signal) => scoreSignalForAgent(agent, signal, context))
+    .sort((a, b) => b.conviction - a.conviction)
+    .slice(0, 5)
+    .map((scored, index) => {
+      const action = pickAction(scored, index);
+      return {
+        agentId: agent.id,
+        symbol: scored.symbol,
+        action,
+        conviction: scored.conviction,
+        rationale: `${agent.name} bias ${action.toUpperCase()} on ${scored.symbol}: ${scored.reason}`,
+        evidence: {
+          agent: summarizeAgent(agent),
+          signal: scored.signal,
+          biasScore: scored.biasScore,
+          localAiScore: scored.signal.localAiScore,
+          challengePoints: scored.challengePoints,
+          decisionTree: scored.decisionTree,
+          decisionObject: scored.decisionTree.decision,
+        },
+      };
+    });
+}
+
+function scoreSignalForAgent(agent, signal, context = {}) {
+  const bias = agent.bias || {};
+  const sectors = bias.sectors || {};
+  const factors = bias.factors || {};
+  const theme = String(signal.theme || '').toLowerCase();
+  const symbol = signal.symbol;
+  let biasScore = 0;
+  for (const [sector, weight] of Object.entries(sectors)) {
+    if (theme.includes(sector.toLowerCase()) || symbolMatchesSector(symbol, sector)) biasScore += Number(weight) * 100;
+  }
+  if ((bias.watchSymbols || []).includes(symbol)) biasScore += 12;
+  const local = Number(signal.localAiScore ?? 50);
+  const momentum = Number(signal.changePct || 0) > 1 ? 8 : Number(signal.changePct || 0) < -1 ? -8 : 0;
+  const volatility = Number(signal.volatilityPct || 0);
+  const volatilityTerm = (factors.volatilityTolerance || 0) * volatility * 4 - (factors.volatilityPenalty || 0) * volatility * 4;
+  const quality = (factors.moat || factors.quality || 0) * local;
+  const decisionTree = agentDecisionTree.evaluateSignalForAgent({
+    agent,
+    signal,
+    context,
+    personaBiasScore: biasScore,
+  });
+  const conviction = clamp(Math.round(decisionTree.convictionBase + biasScore * 0.15 + momentum * 0.25 + volatilityTerm * 0.2 + quality * 0.08), 0, decisionTree.hardFailures.length ? 44 : 100);
+  const challengePoints = [];
+  if (volatility > 4 && !(factors.volatilityTolerance > 0.1)) challengePoints.push('Volatility may exceed this agent risk style.');
+  if (local < 45) challengePoints.push('Local Brain score is weak, so recommendation should face council challenge.');
+  if (biasScore < 5) challengePoints.push('Symbol is outside the agent preferred domain.');
+  for (const failure of decisionTree.hardFailures) challengePoints.push(`Decision-tree hard gate failed: ${failure}.`);
+  for (const warning of decisionTree.warnings.slice(0, 3)) challengePoints.push(`Decision-tree warning: ${warning}`);
+  return {
+    symbol,
+    signal,
+    conviction,
+    recommendedAction: decisionTree.recommendedAction,
+    biasScore: Number(biasScore.toFixed(2)),
+    challengePoints,
+    decisionTree,
+    reason: `conviction ${conviction}/100 after ${agentDecisionTree.VERSION}; tree recommends ${decisionTree.recommendedAction}, local score ${local}, theme ${signal.theme || 'n/a'}, bias score ${biasScore.toFixed(1)}, margin of safety ${decisionTree.valuation.marginOfSafety}.`,
+  };
+}
+
+function buildDebateRounds(agents, recommendations) {
+  const bySymbol = new Map();
+  for (const rec of recommendations) {
+    const list = bySymbol.get(rec.symbol) || [];
+    list.push(rec);
+    bySymbol.set(rec.symbol, list);
+  }
+  const debates = [];
+  for (const [symbol, recs] of bySymbol.entries()) {
+    const actions = new Set(recs.map((rec) => rec.action));
+    const top = [...recs].sort((a, b) => b.conviction - a.conviction)[0];
+    const skeptic = agents.find((agent) => agent.id !== top.agentId && hasRiskPenalty(agent)) || agents.find((agent) => agent.id !== top.agentId);
+    if (!skeptic) continue;
+    if (actions.size > 1 || top.conviction < 68 || top.evidence.challengePoints?.length) {
+      debates.push({
+        symbol,
+        targetAction: top.action,
+        targetAgentId: top.agentId,
+        targetBrainId: agents.find((agent) => agent.id === top.agentId)?.brain_id,
+        challengerAgentId: skeptic.id,
+        challengerBrainId: skeptic.brain_id,
+        challenge: `${skeptic.name} challenges ${symbol}: ${top.evidence.challengePoints?.[0] || top.evidence.decisionTree?.warnings?.[0] || 'council requires stronger cross-agent evidence before consensus.'}`,
+        alternative: top.action === 'buy' ? 'watch' : 'hold',
+      });
+    }
+  }
+  return debates.slice(0, 12);
+}
+
+function buildConsensus(recommendations, agents) {
+  const agentById = new Map(agents.map((agent) => [agent.id, agent]));
+  const grouped = new Map();
+  for (const rec of recommendations) {
+    const item = grouped.get(rec.symbol) || { symbol: rec.symbol, votes: [], score: 0 };
+    const actionWeight = rec.action === 'buy' ? 1 : rec.action === 'watch' ? 0.4 : rec.action === 'sell' ? -1 : 0;
+    const learningWeight = Number(agentById.get(rec.agentId)?.model?.learningWeight ?? 1);
+    item.score += actionWeight * rec.conviction * learningWeight;
+    item.votes.push({
+      agentId: rec.agentId,
+      agentName: agents.find((agent) => agent.id === rec.agentId)?.name,
+      action: rec.action,
+      conviction: rec.conviction,
+      rationale: rec.rationale,
+    });
+    grouped.set(rec.symbol, item);
+  }
+  const finalRecommendations = [...grouped.values()]
+    .map((item) => {
+      const buyVotes = item.votes.filter((vote) => vote.action === 'buy');
+      const sellVotes = item.votes.filter((vote) => vote.action === 'sell');
+      const avgConviction = Math.round(item.votes.reduce((sum, vote) => sum + vote.conviction, 0) / item.votes.length);
+      const action = item.score > 90 && buyVotes.length >= 2 ? 'buy' : item.score < -45 || sellVotes.length >= 2 ? 'sell' : 'watch';
+      return {
+        symbol: item.symbol,
+        action,
+        consensusScore: Math.round(item.score),
+        avgConviction,
+        supportingAgents: item.votes.filter((vote) => vote.action === action || (action === 'watch' && vote.action !== 'sell')).map((vote) => vote.agentName),
+        decisionFrameworkVersion: agentDecisionTree.VERSION,
+        votes: item.votes,
+      };
+    })
+    .sort((a, b) => b.consensusScore - a.consensusScore)
+    .slice(0, 10);
+  return {
+    generatedAt: new Date().toISOString(),
+    agentCount: agents.length,
+    recommendationCount: recommendations.length,
+    finalRecommendations,
+    operatingMode: 'simulation-council',
+    decisionFrameworkVersion: agentDecisionTree.VERSION,
+    decisionFramework: agentDecisionTree.buildDecisionFramework({}),
+    disclaimer: 'Agent recommendations are simulated strategy opinions. They do not mean the named public figures made or endorsed any trade.',
+  };
+}
+
+function ensureDecisionFramework(agent) {
+  if (agent.model?.decisionFrameworkVersion === agentDecisionTree.VERSION && agent.model?.decisionFramework) return agent;
+  return tradingAgentRepo.updateAgent(agent.user_id, agent.id, {
+    model: {
+      ...(agent.model || {}),
+      decisionFrameworkVersion: agentDecisionTree.VERSION,
+      decisionFramework: agentDecisionTree.buildDecisionFramework(agent),
+    },
+  }) || agent;
+}
+
+function persistAgentSources(userId, agent) {
+  for (const url of agent.sourceUrls || []) {
+    researchSourceRepo.upsert({
+      userId,
+      url,
+      title: `${agent.name} personality source`,
+      sourceType: 'learned',
+      discoveryMethod: `personality-agent:${agent.slug}`,
+      tags: ['personality-agent', agent.slug].slice(0, 8),
+      relevanceScore: 68,
+      credibilityScore: 58,
+      notes: `Source attached to ${agent.name} personality model.`,
+    });
+  }
+}
+
+function registerMeshAgent(agent) {
+  brainMesh.registerAgent({
+    id: agent.brain_id,
+    userId: agent.user_id,
+    role: 'personality-trading-agent',
+    capabilities: ['agent.thesis.proposed', 'agent.challenge.raised', 'agent.vote.cast', 'mesh.status'],
+    metadata: {
+      agentId: agent.id,
+      name: agent.name,
+      archetype: agent.persona?.archetype,
+    },
+  });
+}
+
+function fallbackSignals(agent) {
+  return (agent.bias?.watchSymbols || ['SPY', 'QQQ']).map((symbol) => ({
+    symbol,
+    localAiScore: 50,
+    changePct: 0,
+    volatilityPct: 1,
+    theme: 'agent-watchlist',
+    price: 0,
+  }));
+}
+
+function stripRecommendationForFrame(rec) {
+  return {
+    symbol: rec.symbol,
+    action: rec.action,
+    conviction: rec.conviction,
+    rationale: rec.rationale,
+    challengePoints: rec.evidence?.challengePoints || [],
+  };
+}
+
+function summarizeAgent(agent) {
+  return {
+    id: agent.id,
+    name: agent.name,
+    brainId: agent.brain_id,
+    archetype: agent.persona?.archetype,
+    style: agent.persona?.style || [],
+  };
+}
+
+function hasRiskPenalty(agent) {
+  return (agent.bias?.factors?.riskPenalty || agent.bias?.factors?.volatilityPenalty || 0) > 0;
+}
+
+function pickAction(scored, index) {
+  if (scored.recommendedAction === 'buy') return index <= 4 ? 'buy' : 'watch';
+  if (scored.recommendedAction === 'sell') return 'sell';
+  if (scored.recommendedAction === 'watch') return 'watch';
+  if (scored.conviction >= 72 && index <= 2) return 'buy';
+  if (scored.conviction <= 28) return 'sell';
+  if (scored.conviction >= 55) return 'watch';
+  return 'hold';
+}
+
+function symbolMatchesSector(symbol, sector) {
+  const map = {
+    software: ['MSFT', 'CRM', 'NOW', 'SHOP', 'SNOW', 'PLTR'],
+    semiconductors: ['NVDA', 'AMD', 'TSM', 'AVGO', 'SOXX'],
+    cloud: ['AMZN', 'MSFT', 'GOOGL', 'ORCL'],
+    ai: ['NVDA', 'MSFT', 'GOOGL', 'PLTR', 'AMD', 'TSLA'],
+    ev: ['TSLA'],
+    energy: ['XOM', 'CVX', 'COP', 'SLB', 'XLE'],
+    defense: ['LMT', 'RTX', 'NOC', 'GD', 'ITA', 'PLTR'],
+    healthcare: ['LLY', 'NVO', 'PFE', 'MRK', 'JNJ', 'UNH'],
+    ecommerce: ['AMZN', 'SHOP', 'WMT'],
+    logistics: ['AMZN', 'UBER', 'FDX', 'UPS'],
+    financials: ['JPM', 'BAC', 'GS', 'XLF', 'V', 'MA'],
+    media: ['DIS', 'NFLX', 'META', 'DJT'],
+  };
+  return (map[sector] || []).includes(symbol);
+}
+
+function slugify(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'agent';
+}
+
+function cleanText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function objectOrExisting(value, existing) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : existing;
+}
+
+function normalizeUrls(urls) {
+  return [...new Set((urls || []).map((url) => String(url || '').trim()).filter(Boolean))].slice(0, 100);
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function emit(onEvent, phase, progress, level, message, data) {
+  onEvent({ phase, progress, level, message, data });
+}
+
+module.exports = {
+  DEFAULT_PERSONAS,
+  ensureDefaultAgents,
+  listAgents,
+  createAgent,
+  createAgentFromProfile,
+  startResearchCreateAgent,
+  getResearchCreateRun,
+  updateAgent,
+  deleteAgent,
+  exportAgent,
+  importAgent,
+  runCouncil,
+  listCouncilRuns,
+};

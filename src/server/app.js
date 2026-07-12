@@ -12,6 +12,8 @@ const researchRoutes = require('../routes/researchRoutes');
 const orderRoutes = require('../routes/orderRoutes');
 const settingsRoutes = require('../routes/settingsRoutes');
 const companyRoutes = require('../routes/companyRoutes');
+const brainMeshRoutes = require('../routes/brainMeshRoutes');
+const agentRoutes = require('../routes/agentRoutes');
 
 function createApp() {
   const app = express();
@@ -34,6 +36,8 @@ function createApp() {
   app.use('/api/orders', requireAuth, orderRoutes);
   app.use('/api/settings', requireAuth, settingsRoutes);
   app.use('/api/companies', requireAuth, companyRoutes);
+  app.use('/api/brain-mesh', requireAuth, brainMeshRoutes);
+  app.use('/api/agents', requireAuth, agentRoutes);
 
   app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 

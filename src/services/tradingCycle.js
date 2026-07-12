@@ -6,8 +6,11 @@ const orderRepo = require('../db/repositories/orderRepo');
 const positionRepo = require('../db/repositories/positionRepo');
 const pnlRepo = require('../db/repositories/pnlRepo');
 const brokerAccountRepo = require('../db/repositories/brokerAccountRepo');
+const glLedgerRepo = require('../db/repositories/glLedgerRepo');
 const rulesEngine = require('./rulesEngine');
 const { buildDecisionReport } = require('./decisionReportService');
+const settingsRepo = require('../db/repositories/settingsRepo');
+const alertingService = require('./alertingService');
 const logger = require('../utils/logger');
 
 /**
@@ -17,7 +20,21 @@ const logger = require('../utils/logger');
  * are injectable for the same reason (tests substitute deterministic stubs
  * instead of hitting Finnhub/OpenAI).
  */
-async function runTradingCycle({
+async function runTradingCycle(args) {
+  const { userId, executionMode = 'auto' } = args;
+  try {
+    return await runTradingCycleInner(args);
+  } catch (error) {
+    if (executionMode === 'auto') {
+      const reason = `Unattended trading cycle threw an uncaught error: ${error.message}`;
+      settingsRepo.engageAutoKillSwitch(userId, 'automatic_strategy_kill_switch', reason);
+      alertingService.alertKillSwitch({ userId, switchName: 'automatic_strategy_kill_switch', reason });
+    }
+    throw error;
+  }
+}
+
+async function runTradingCycleInner({
   userId,
   broker,
   watchlist,
@@ -36,11 +53,26 @@ async function runTradingCycle({
 
   const brokerAccount = brokerAccountRepo.ensureDefault(userId);
   emit(onEvent, 'broker', 82, 'debug', 'Loading account state and safety settings.');
-  const accountState = await broker.getAccountState();
-  const settings = require('../db/repositories/settingsRepo').get(userId);
+  let accountState;
+  let brokerConnectionFailed = false;
+  try {
+    accountState = await broker.getAccountState();
+  } catch (error) {
+    brokerConnectionFailed = true;
+    const reason = `Broker connection/account-state call failed: ${error.message}`;
+    settingsRepo.engageAutoKillSwitch(userId, 'broker_connection_kill_switch', reason);
+    alertingService.alertKillSwitch({ userId, switchName: 'broker_connection_kill_switch', reason });
+    logger.error('Broker connection failed; tripped broker_connection_kill_switch and falling back to simulation.', {
+      userId,
+      error: error.message,
+    });
+    accountState = { cashUsd: 0, buyingPowerUsd: 0 };
+  }
+  const settings = settingsRepo.get(userId);
   const liveReady =
-    executionMode === 'live' ||
-    (executionMode === 'auto' && settings?.trading_enabled && !settings?.kill_switch_engaged && broker?.live === true);
+    !brokerConnectionFailed &&
+    (executionMode === 'live' ||
+      (executionMode === 'auto' && settings?.trading_enabled && !settingsRepo.isAnyKillSwitchEngaged(settings) && broker?.live === true));
   const mode = liveReady ? 'live' : 'simulation';
   const resolvedReason =
     modeReason ||
@@ -133,6 +165,7 @@ async function runTradingCycle({
     }
     if (mode === 'simulation') {
       tradingPlanRepo.setActionStatus(action.id, `simulated_would_${action.action}`);
+      recordSimulatedLedgerEntry({ userId, brokerAccount, action, researchSnapshot });
       continue;
     }
     await executeAction({ userId, brokerAccount, broker, action, researchSnapshot });
@@ -161,6 +194,11 @@ async function runTradingCycle({
 function buildSimulationReason({ settings, broker }) {
   if (!settings?.trading_enabled) return 'Trading is disabled, so AutoTrader generated a simulation report only.';
   if (settings?.kill_switch_engaged) return 'The kill switch is engaged, so AutoTrader generated a simulation report only.';
+  for (const switchName of settingsRepo.AUTO_KILL_SWITCHES) {
+    if (settings?.[`${switchName}_engaged`]) {
+      return `${switchName} is engaged (${settings[`${switchName}_reason`] || 'no reason recorded'}), so AutoTrader generated a simulation report only.`;
+    }
+  }
   if (broker?.live !== true) return 'A live Robinhood broker connection is unavailable, so AutoTrader generated a simulation report only.';
   return 'Simulation mode was requested explicitly.';
 }
@@ -227,6 +265,18 @@ async function executeAction({ userId, brokerAccount, broker, action, researchSn
       balanceAfterUsd: newAccountState.cashUsd,
       note: `${action.action} ${action.quantity} ${action.symbol} @ ${result.fillPrice}`,
     });
+    glLedgerRepo.recordTrade({
+      userId,
+      brokerAccountId: brokerAccount.id,
+      orderId: order.id,
+      planActionId: action.id,
+      symbol: action.symbol,
+      side: action.action,
+      quantity: action.quantity || 0,
+      unitPrice: result.fillPrice,
+      sourceType: 'order_fill',
+      memo: `Executed ${action.action} ${action.quantity} ${action.symbol} @ ${result.fillPrice}`,
+    });
     brokerAccountRepo.updateBalance(brokerAccount.id, newAccountState.cashUsd, newAccountState.buyingPowerUsd, 'connected');
 
     tradingPlanRepo.setActionStatus(action.id, 'executed');
@@ -235,6 +285,21 @@ async function executeAction({ userId, brokerAccount, broker, action, researchSn
     orderRepo.markFailed(order.id);
     tradingPlanRepo.setActionStatus(action.id, 'execution_error');
   }
+}
+
+function recordSimulatedLedgerEntry({ userId, brokerAccount, action, researchSnapshot }) {
+  const signal = researchSnapshot.signals.find((s) => s.symbol === action.symbol);
+  glLedgerRepo.recordTrade({
+    userId,
+    brokerAccountId: brokerAccount.id,
+    planActionId: action.id,
+    symbol: action.symbol,
+    side: action.action,
+    quantity: action.quantity || 0,
+    unitPrice: signal?.price || 0,
+    sourceType: 'simulation',
+    memo: `Simulated would ${action.action} ${action.quantity || 0} ${action.symbol} @ ${signal?.price || 0}`,
+  });
 }
 
 function emit(onEvent, phase, progress, level, message, data) {

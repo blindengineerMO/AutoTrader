@@ -56,4 +56,74 @@ describe('researchSourceRepo', () => {
     expect(relearned.failure_count).toBe(0);
     expect(researchSourceRepo.listActiveByUser(user.id, 20).map((item) => item.id)).toContain(source.id);
   });
+
+  it('queries research URL memory with pagination, search, filters, and sort order', () => {
+    const user = userRepo.createUser({
+      email: `sources-query-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+
+    researchSourceRepo.upsert({
+      userId: user.id,
+      url: 'https://sec.example.com/edgar-xbrl',
+      title: 'SEC EDGAR XBRL',
+      sourceType: 'seed',
+      status: 'active',
+      discoveryMethod: 'spec-catalog',
+      tags: ['sec', 'filings'],
+      relevanceScore: 91,
+      credibilityScore: 96,
+    });
+    researchSourceRepo.upsert({
+      userId: user.id,
+      url: 'https://macro.example.com/fred',
+      title: 'FRED Macro',
+      sourceType: 'seed',
+      status: 'paused',
+      discoveryMethod: 'spec-catalog',
+      tags: ['macro'],
+      relevanceScore: 84,
+      credibilityScore: 94,
+    });
+    researchSourceRepo.upsert({
+      userId: user.id,
+      url: 'https://news.example.com/markets',
+      title: 'Market News',
+      sourceType: 'learned',
+      status: 'active',
+      discoveryMethod: 'crawlee',
+      tags: ['news'],
+      relevanceScore: 55,
+      credibilityScore: 42,
+    });
+
+    const searched = researchSourceRepo.queryByUser(user.id, {
+      search: 'EDGAR',
+      page: 1,
+      pageSize: 5,
+    });
+    expect(searched.total).toBe(1);
+    expect(searched.items[0].title).toBe('SEC EDGAR XBRL');
+
+    const filtered = researchSourceRepo.queryByUser(user.id, {
+      status: 'active',
+      sourceType: 'seed',
+      sortBy: 'credibility_score',
+      sortDir: 'desc',
+    });
+    expect(filtered.items.map((source) => source.title)).toEqual(['SEC EDGAR XBRL']);
+
+    const paged = researchSourceRepo.queryByUser(user.id, {
+      page: 2,
+      pageSize: 1,
+      sortBy: 'relevance_score',
+      sortDir: 'desc',
+    });
+    expect(paged.total).toBe(3);
+    expect(paged.totalPages).toBe(3);
+    expect(paged.items).toHaveLength(1);
+    expect(paged.items[0].title).toBe('FRED Macro');
+  });
 });

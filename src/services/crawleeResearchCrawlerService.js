@@ -12,16 +12,21 @@ async function crawlAutonomousResearch({
   queries = DEFAULT_SEARCH_QUERIES,
   seedSources = [],
   onEvent = () => {},
-  maxFollowUps = 10,
-  maxRequests = 32,
-  minContinuationScore = 2.75,
+  maxFollowUps = 18,
+  maxRequests = 96,
+  minContinuationScore = 1.85,
+  maxWaves = 8,
+  maxSearchExpansions = 36,
+  maxRuntimeMs = 6 * 60 * 1000,
 } = {}) {
   emit(onEvent, 'crawlee-search', 13, 'info', 'Starting autonomous Crawlee discovery from broad news search queries.', {
-    queries: queries.slice(0, 4),
+    queries: queries.slice(0, 12),
+    maxRequests,
+    maxWaves,
   });
 
-  const searchRequests = queries.slice(0, 4).flatMap((query) => buildSearchRequests(query));
-  const sourceRequests = seedSources.slice(0, 8).map((source) => ({
+  const searchRequests = queries.slice(0, 12).flatMap((query) => buildSearchRequests(query));
+  const sourceRequests = seedSources.slice(0, 18).map((source) => ({
     url: source.url,
     userData: { type: 'learned-source', depth: 0, title: source.title, source },
   }));
@@ -29,12 +34,16 @@ async function crawlAutonomousResearch({
   const pages = [];
   const failures = [];
   const discovered = [];
+  const entityLeads = new Map();
   const seenUrls = new Set();
+  const seenQueries = new Set(queries.map(normalizeQuery));
   let frontier = [...searchRequests, ...sourceRequests].filter((request) => rememberUrl(seenUrls, request.url));
   let requested = 0;
+  let searchExpansionCount = 0;
   let wave = 0;
+  const startedAt = Date.now();
 
-  while (frontier.length && requested < maxRequests) {
+  while (frontier.length && requested < maxRequests && wave < maxWaves && Date.now() - startedAt < maxRuntimeMs) {
     const remaining = maxRequests - requested;
     const batch = frontier.slice(0, remaining);
     requested += batch.length;
@@ -53,6 +62,15 @@ async function crawlAutonomousResearch({
     });
     pages.push(...result.pages);
     failures.push(...result.failures);
+    for (const page of result.pages) {
+      for (const lead of extractEntityLeads(page)) {
+        const existing = entityLeads.get(lead.key) || { ...lead, score: 0, evidence: [] };
+        existing.score += lead.score;
+        existing.evidence.push(...lead.evidence);
+        existing.evidence = existing.evidence.slice(0, 8);
+        entityLeads.set(lead.key, existing);
+      }
+    }
 
     const candidates = result.pages
       .flatMap((page) => page.links.map((link) => ({
@@ -65,14 +83,26 @@ async function crawlAutonomousResearch({
       .sort((a, b) => b.score - a.score)
       .filter((link) => rememberUrl(seenUrls, link.url));
 
-    const selected = candidates.slice(0, Math.min(maxFollowUps, Math.max(4, 12 - wave * 2)));
+    const articleSearches = result.pages
+      .flatMap((page) => deriveSearchQueriesFromPage(page))
+      .filter((query) => {
+        const normalized = normalizeQuery(query);
+        if (!normalized || seenQueries.has(normalized)) return false;
+        seenQueries.add(normalized);
+        return true;
+      })
+      .slice(0, Math.max(0, maxSearchExpansions - searchExpansionCount));
+    searchExpansionCount += articleSearches.length;
+
+    const selected = candidates.slice(0, Math.min(maxFollowUps, Math.max(6, 18 - wave)));
     discovered.push(...selected);
 
-    if (!selected.length) {
+    if (!selected.length && !articleSearches.length) {
       emit(onEvent, 'crawlee-stop', 22 + wave * 3, 'debug', 'Crawlee stopped expanding because relevance dropped below the continuation threshold.', {
         wave,
         threshold: minContinuationScore,
         inspectedPages: pages.length,
+        entityLeads: entityLeads.size,
       });
       break;
     }
@@ -85,12 +115,24 @@ async function crawlAutonomousResearch({
         score: link.score,
         reason: continuationReason(link),
       })).slice(0, 8),
+      generatedSearches: articleSearches.slice(0, 8),
+      entityLeads: [...entityLeads.values()].sort((a, b) => b.score - a.score).slice(0, 8).map((lead) => ({
+        name: lead.name,
+        symbol: lead.symbol,
+        score: Number(lead.score.toFixed(2)),
+      })),
     });
 
-    frontier = selected.map((link) => ({
-      url: link.url,
-      userData: { type: 'adaptive-follow-up', depth: link.depth, title: link.text, discoveredFromUrl: link.discoveredFromUrl },
-    }));
+    frontier = [
+      ...selected.map((link) => ({
+        url: link.url,
+        userData: { type: 'adaptive-follow-up', depth: link.depth, title: link.text, discoveredFromUrl: link.discoveredFromUrl },
+      })),
+      ...articleSearches.flatMap((query) => buildSearchRequests(query).map((request) => ({
+        ...request,
+        userData: { ...request.userData, type: 'article-derived-search', depth: wave + 1, parentWave: wave },
+      }))),
+    ].filter((request) => rememberUrl(seenUrls, request.url));
     wave += 1;
   }
 
@@ -99,12 +141,28 @@ async function crawlAutonomousResearch({
       requested,
       pages: pages.length,
     });
+  } else if (wave >= maxWaves) {
+    emit(onEvent, 'crawlee-stop', 42, 'debug', 'Crawlee stopped after exhausting adaptive research waves.', {
+      waves: wave,
+      pages: pages.length,
+      entityLeads: entityLeads.size,
+    });
+  } else if (Date.now() - startedAt >= maxRuntimeMs) {
+    emit(onEvent, 'crawlee-stop', 42, 'warn', 'Crawlee stopped because the runtime safety budget was reached.', {
+      runtimeMs: Date.now() - startedAt,
+      pages: pages.length,
+      entityLeads: entityLeads.size,
+    });
   }
 
   return {
     pages,
     discovered: discovered.filter(uniqueByUrl()),
     failures,
+    entityLeads: [...entityLeads.values()]
+      .map((lead) => ({ ...lead, score: Number(lead.score.toFixed(2)), evidence: lead.evidence.slice(0, 6) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 80),
   };
 }
 
@@ -141,7 +199,8 @@ async function crawlPages({ requests, label, maxRequestsPerCrawl, onEvent }) {
       const page = {
         url: cleanUrl(request.loadedUrl || request.url),
         title,
-        excerpt: text.slice(0, 1000),
+        excerpt: text.slice(0, 3000),
+        fullText: text.slice(0, 18000),
         links,
         score: {
           relevance: scoreText(text.slice(0, 5000)),
@@ -233,6 +292,90 @@ function scoreText(text) {
   return RELEVANCE_TERMS.reduce((score, term) => score + (lower.includes(term) ? 1 : 0), 0);
 }
 
+function deriveSearchQueriesFromPage(page) {
+  const text = `${page.title || ''} ${page.excerpt || ''}`;
+  const leads = extractEntityLeads(page).slice(0, 6);
+  const titleTerms = cleanText(page.title)
+    .replace(/[^\w\s$.-]/g, ' ')
+    .split(/\s+/)
+    .filter((word) => word.length > 3 && !STOP_WORDS.has(word.toLowerCase()))
+    .slice(0, 8)
+    .join(' ');
+  const topicQueries = [];
+  if (titleTerms) topicQueries.push(`${titleTerms} stock market investment impact`);
+  for (const lead of leads) {
+    const target = lead.symbol ? `${lead.name} ${lead.symbol}` : lead.name;
+    topicQueries.push(`${target} stock ticker ownership investment news`);
+    topicQueries.push(`${target} earnings revenue deal market opportunity`);
+  }
+  for (const phrase of extractResearchPhrases(text).slice(0, 4)) {
+    topicQueries.push(`${phrase} public company ticker investment opportunity`);
+  }
+  return [...new Set(topicQueries.map(cleanText).filter((query) => query.length >= 12))].slice(0, 10);
+}
+
+function extractEntityLeads(page) {
+  const text = `${page.title || ''} ${page.fullText || page.excerpt || ''}`;
+  const leads = new Map();
+  const symbolPatterns = [
+    /\$([A-Z]{1,5}(?:\.[A-Z])?)\b/g,
+    /\b(?:NASDAQ|NYSE|NYSEARCA|AMEX|OTC)\s*[: ]\s*([A-Z]{1,5}(?:\.[A-Z])?)\b/g,
+    /\(([A-Z]{1,5}(?:\.[A-Z])?)\)/g,
+  ];
+  for (const pattern of symbolPatterns) {
+    for (const match of text.matchAll(pattern)) {
+      const symbol = match[1];
+      if (SYMBOL_BLACKLIST.has(symbol)) continue;
+      addLead(leads, {
+        key: `symbol:${symbol}`,
+        symbol,
+        name: symbol,
+        type: 'ticker',
+        score: 4,
+        evidence: [{ title: page.title, url: page.url, reason: `Direct ticker mention ${symbol}` }],
+      });
+    }
+  }
+
+  const companyPattern = /\b([A-Z][A-Za-z0-9&.'-]*(?:\s+[A-Z][A-Za-z0-9&.'-]*){0,4}\s+(?:Inc|Corp|Corporation|Company|Companies|Co|Ltd|PLC|Holdings|Group|Technologies|Technology|Systems|Labs|Energy|Motors|Industries|Software|Semiconductor|Pharma|Capital|Ventures|Partners))\b/g;
+  for (const match of text.matchAll(companyPattern)) {
+    const name = cleanText(match[1]).replace(/\s+(the|and)$/i, '');
+    if (name.length < 4 || ENTITY_BLACKLIST.has(name.toLowerCase())) continue;
+    addLead(leads, {
+      key: `entity:${name.toLowerCase()}`,
+      name,
+      type: 'company-entity',
+      score: 2.6,
+      evidence: [{ title: page.title, url: page.url, reason: `Company-like entity mention ${name}` }],
+    });
+  }
+  return [...leads.values()].sort((a, b) => b.score - a.score).slice(0, 18);
+}
+
+function extractResearchPhrases(text) {
+  const lower = String(text || '').toLowerCase();
+  const phrases = [];
+  const patterns = [
+    /(?:acquired|acquires|buys|bought|invests in|investment in|stake in)\s+([a-z0-9&.' -]{3,70})/g,
+    /(?:launched|announced|released|unveiled)\s+([a-z0-9&.' -]{3,70})/g,
+    /(?:contract with|deal with|partnership with)\s+([a-z0-9&.' -]{3,70})/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of lower.matchAll(pattern)) {
+      const phrase = cleanText(match[1]).split(/[.,;:]/)[0];
+      if (phrase.length >= 8) phrases.push(phrase);
+    }
+  }
+  return [...new Set(phrases)].slice(0, 12);
+}
+
+function addLead(map, lead) {
+  const existing = map.get(lead.key) || { ...lead, score: 0, evidence: [] };
+  existing.score += lead.score;
+  existing.evidence.push(...lead.evidence);
+  map.set(lead.key, existing);
+}
+
 function continuationScore(link, page) {
   const base = scoreText(`${link.text} ${link.url}`);
   const parentBoost = Math.min(3, (page.score?.relevance || 0) * 0.28);
@@ -297,6 +440,10 @@ function cleanText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+function normalizeQuery(query) {
+  return cleanText(query).toLowerCase();
+}
+
 function emit(onEvent, phase, progress, level, message, data) {
   onEvent({ phase, progress, level, message, data });
 }
@@ -326,7 +473,22 @@ const RELEVANCE_TERMS = [
   'company',
   'revenue',
   'profit',
+  'ownership',
+  'stake',
+  'acquisition',
+  'investment',
+  'startup',
+  'ipo',
+  'funding',
+  'contract',
+  'partnership',
+  'launch',
+  'product',
 ];
+
+const STOP_WORDS = new Set(['with', 'from', 'that', 'this', 'have', 'into', 'after', 'before', 'about', 'market', 'stock', 'news', 'today']);
+const SYMBOL_BLACKLIST = new Set(['CEO', 'CFO', 'COO', 'SEC', 'IPO', 'ETF', 'USA', 'USD', 'AI', 'EV', 'GDP', 'CPI', 'FED']);
+const ENTITY_BLACKLIST = new Set(['the company', 'news corp', 'google news']);
 
 module.exports = {
   DEFAULT_SEARCH_QUERIES,
@@ -334,4 +496,6 @@ module.exports = {
   crawlSingleSource,
   scoreText,
   inferTags,
+  extractEntityLeads,
+  deriveSearchQueriesFromPage,
 };

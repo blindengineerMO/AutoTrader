@@ -45,4 +45,65 @@ async function getQuotes(symbols, { apiKey } = {}) {
   return results;
 }
 
-module.exports = { getQuote, getQuotes };
+async function searchSymbol(query, { apiKey } = {}) {
+  const data = await get('/search', { q: query }, apiKey);
+  return (data.result || []).map((item) => ({
+    symbol: item.symbol,
+    description: item.description,
+    displaySymbol: item.displaySymbol,
+    type: item.type,
+  }));
+}
+
+async function getCompanyProfile(symbol, { apiKey } = {}) {
+  return get('/stock/profile2', { symbol }, apiKey);
+}
+
+async function getBasicFinancials(symbol, { apiKey, metric = 'all' } = {}) {
+  return get('/stock/metric', { symbol, metric }, apiKey);
+}
+
+async function getCompanyNews(symbol, { apiKey, from, to } = {}) {
+  const today = new Date();
+  const start = from || new Date(today.getTime() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10);
+  const end = to || today.toISOString().slice(0, 10);
+  return get('/company-news', { symbol, from: start, to: end }, apiKey);
+}
+
+async function getRecommendationTrends(symbol, { apiKey } = {}) {
+  return get('/stock/recommendation', { symbol }, apiKey);
+}
+
+async function researchCompany(symbol, { apiKey } = {}) {
+  const cleanSymbol = String(symbol || '').toUpperCase();
+  const result = { symbol: cleanSymbol, available: Boolean(apiKey), errors: [] };
+  if (!apiKey || !cleanSymbol) return result;
+
+  const calls = [
+    ['quote', () => getQuote(cleanSymbol, apiKey)],
+    ['profile', () => getCompanyProfile(cleanSymbol, { apiKey })],
+    ['metrics', () => getBasicFinancials(cleanSymbol, { apiKey })],
+    ['news', () => getCompanyNews(cleanSymbol, { apiKey })],
+    ['recommendations', () => getRecommendationTrends(cleanSymbol, { apiKey })],
+  ];
+  for (const [key, fn] of calls) {
+    try {
+      result[key] = await fn();
+    } catch (err) {
+      result.errors.push({ key, error: err.message });
+      logger.warn('Finnhub company research call failed', { symbol: cleanSymbol, key, error: err.message });
+    }
+  }
+  return result;
+}
+
+module.exports = {
+  getQuote,
+  getQuotes,
+  searchSymbol,
+  getCompanyProfile,
+  getBasicFinancials,
+  getCompanyNews,
+  getRecommendationTrends,
+  researchCompany,
+};

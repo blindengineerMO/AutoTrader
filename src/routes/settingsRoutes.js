@@ -29,6 +29,16 @@ const sourceSchema = z.object({
   credibilityScore: z.number().min(0).max(100).optional(),
 });
 
+const sourceQuerySchema = z.object({
+  page: z.coerce.number().int().positive().optional(),
+  pageSize: z.coerce.number().int().min(1).max(100).optional(),
+  search: z.string().max(200).optional(),
+  status: z.enum(['', 'active', 'paused', 'blocked', 'failed']).optional(),
+  sourceType: z.string().max(50).optional(),
+  sortBy: z.enum(['updated_at', 'relevance_score', 'credibility_score', 'failure_count', 'success_count', 'title', 'url', 'status', 'source_type']).optional(),
+  sortDir: z.enum(['asc', 'desc']).optional(),
+});
+
 router.get('/', (req, res) => {
   res.json(settingsRepo.get(req.user.id));
 });
@@ -39,8 +49,9 @@ router.get('/providers', (req, res) => {
 
 router.get('/research-sources', (req, res) => {
   sourceLearning.seedSources(req.user.id);
-  const limit = Number(req.query.limit) || 150;
-  res.json(researchSourceRepo.listByUser(req.user.id, limit));
+  const parsed = sourceQuerySchema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid source query' });
+  res.json(researchSourceRepo.queryByUser(req.user.id, parsed.data));
 });
 
 router.post('/research-sources', (req, res) => {
