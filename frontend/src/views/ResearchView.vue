@@ -26,6 +26,16 @@
             {{ running === 'evaluation' ? 'Evaluating...' : 'Run evaluation' }}
           </GlassButton>
         </div>
+        <div class="flex flex-wrap gap-2 mt-4">
+          <button class="hud-window-toggle" :class="{ active: sourcesOpen }" @click="sourcesOpen = !sourcesOpen">
+            <v-icon size="16">mdi-database-search</v-icon>
+            sources
+          </button>
+          <button class="hud-window-toggle" :class="{ active: decisionOpen }" @click="decisionOpen = !decisionOpen">
+            <v-icon size="16">mdi-file-chart-outline</v-icon>
+            decision report
+          </button>
+        </div>
       </div>
     </div>
 
@@ -99,44 +109,6 @@
       </GlassCard>
     </div>
 
-    <div class="bento-grid stagger mb-6">
-      <GlassCard title="Data sources" class="bento-span-4">
-        <div v-if="!sourceStack.length" class="text-white/42 text-sm">Sources will appear after the next autonomous run.</div>
-        <div v-else class="source-list">
-          <a v-for="source in sourceStack" :key="`${source.name}-${source.url}`" :href="source.url" target="_blank" rel="noreferrer" class="source-row mini-glass">
-            <span class="source-dot"></span>
-            <span class="min-w-0">
-              <strong>{{ source.name }}</strong>
-              <small>{{ source.type }}{{ source.region ? ` · ${source.region}` : '' }}</small>
-            </span>
-          </a>
-        </div>
-      </GlassCard>
-
-      <GlassCard title="Decision report" class="bento-span-8">
-        <div v-if="!latestReport" class="text-white/42 text-sm">No report generated yet.</div>
-        <div v-else class="decision-table">
-          <div class="decision-row decision-head">
-            <span>Action</span>
-            <span>Symbol</span>
-            <span>Evidence</span>
-            <span>Status</span>
-          </div>
-          <div v-for="action in latestReport.summary.actions" :key="`${latestReport.id}-${action.symbol}-${action.status}`" class="decision-row mini-glass">
-            <span class="uppercase font-bold" :class="action.action === 'buy' ? 'text-accent' : action.action === 'sell' ? 'text-danger' : 'text-white/55'">
-              {{ action.action }}
-            </span>
-            <span class="font-headline">{{ action.symbol }}</span>
-            <span class="min-w-0">
-              <span class="block text-white/70">{{ evidenceLine(action) }}</span>
-              <small class="block text-white/38">{{ action.rationale }}</small>
-            </span>
-            <span class="text-white/42">{{ action.status }}</span>
-          </div>
-        </div>
-      </GlassCard>
-    </div>
-
     <div class="bento-grid stagger">
       <GlassCard title="Research runs" class="bento-span-5">
         <div v-if="!runs.length" class="text-white/42 text-sm">No research operations yet.</div>
@@ -179,6 +151,55 @@
       terminal
     </button>
 
+    <aside v-if="sourcesOpen" class="floating-glass-window floating-sources-window">
+      <div class="floating-window-head">
+        <span>data sources</span>
+        <button @click="sourcesOpen = false"><v-icon size="16">mdi-close</v-icon></button>
+      </div>
+      <div class="floating-window-body source-list">
+        <div v-if="!sourceStack.length" class="text-white/42 text-sm">Sources will appear after the next autonomous run.</div>
+        <template v-else>
+          <a v-for="source in sourceStack" :key="`${source.name}-${source.url}`" :href="source.url" target="_blank" rel="noreferrer" class="source-row mini-glass">
+            <span class="source-dot"></span>
+            <span class="min-w-0">
+              <strong>{{ source.name }}</strong>
+              <small>{{ source.type }}{{ source.region ? ` · ${source.region}` : '' }}</small>
+            </span>
+          </a>
+        </template>
+      </div>
+    </aside>
+
+    <aside v-if="decisionOpen" class="floating-glass-window floating-decision-window">
+      <div class="floating-window-head">
+        <span>decision report</span>
+        <button @click="decisionOpen = false"><v-icon size="16">mdi-close</v-icon></button>
+      </div>
+      <div class="floating-window-body">
+        <div v-if="!latestReport" class="text-white/42 text-sm">No report generated yet.</div>
+        <div v-else class="decision-table">
+          <div class="decision-row decision-head">
+            <span>Action</span>
+            <span>Symbol</span>
+            <span>Evidence</span>
+            <span>Status</span>
+          </div>
+          <div v-for="action in latestReport.summary.actions" :key="`${latestReport.id}-${action.symbol}-${action.status}`" class="decision-row mini-glass">
+            <span class="uppercase font-bold" :class="action.action === 'buy' ? 'text-accent' : action.action === 'sell' ? 'text-danger' : 'text-white/55'">
+              {{ action.action }}
+            </span>
+            <span class="font-headline">{{ action.symbol }}</span>
+            <span class="min-w-0">
+              <span class="block text-white/70">{{ evidenceLine(action) }}</span>
+              <small class="block text-white/38">{{ action.rationale }}</small>
+              <small v-if="action.evidence?.discovery" class="block text-accent/70">{{ action.evidence.discovery.evidence?.[0]?.reason }}</small>
+            </span>
+            <span class="text-white/42">{{ action.status }}</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
     <aside v-if="terminalOpen && (selectedRun || activeRun)" class="floating-terminal">
       <div class="terminal-head">
         <span>debug stream · run #{{ terminalRun.id }}</span>
@@ -210,6 +231,8 @@ const runs = ref([]);
 const activeRun = ref(null);
 const selectedRun = ref(null);
 const terminalOpen = ref(false);
+const sourcesOpen = ref(false);
+const decisionOpen = ref(false);
 const running = ref(false);
 const error = ref('');
 let pollTimer = null;

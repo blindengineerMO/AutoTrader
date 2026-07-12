@@ -35,8 +35,9 @@ const { runTradingCycle } = require('../src/services/tradingCycle');
 
 // research_snapshot_id is a real FK on trading_plans, so the stub must
 // actually persist a snapshot rather than fabricating an id.
-const stubRunResearchCycleFactory = () =>
+const stubRunResearchCycleFactory = (_watchlist, { userId } = {}) =>
   researchRepo.create({
+    userId,
     source: 'stub',
     summary: { watchlist: ['NVDA', 'AAPL'] },
     signals: [

@@ -28,6 +28,18 @@ const config = {
   groqApiKey: process.env.GROQ_API_KEY || '',
   groqModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
 
+  xaiApiKey: process.env.XAI_API_KEY || process.env.GROK_API_KEY || '',
+  xaiModel: process.env.XAI_MODEL || process.env.GROK_MODEL || 'grok-4',
+
+  geminiApiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '',
+  geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+
+  duckAiResearch: {
+    publicUrl: process.env.DUCK_AI_PUBLIC_URL || 'https://duck.ai/',
+    sanctionedEndpoint: process.env.DUCK_AI_SANCTIONED_ENDPOINT || '',
+    model: process.env.DUCK_AI_MODEL || '',
+  },
+
   finnhubApiKey: process.env.FINNHUB_API_KEY || '',
 
   robinhood: {

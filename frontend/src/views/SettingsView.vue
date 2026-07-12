@@ -142,11 +142,12 @@
                   <span class="hud-chip">{{ source.discovery_method }}</span>
                   <span class="hud-chip">rel {{ Number(source.relevance_score).toFixed(0) }}</span>
                   <span class="hud-chip">cred {{ Number(source.credibility_score).toFixed(0) }}</span>
+                  <span class="hud-chip" :class="source.failure_count >= 10 ? 'text-danger' : ''">fail {{ source.failure_count || 0 }}</span>
                 </div>
               </div>
               <v-select
                 :model-value="source.status"
-                :items="['active', 'paused', 'blocked']"
+                :items="['active', 'paused', 'blocked', 'failed']"
                 variant="outlined"
                 density="compact"
                 hide-details

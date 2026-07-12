@@ -22,7 +22,7 @@ const sourceSchema = z.object({
   url: z.string().url(),
   title: z.string().optional(),
   sourceType: z.string().optional(),
-  status: z.enum(['active', 'paused', 'blocked']).optional(),
+  status: z.enum(['active', 'paused', 'blocked', 'failed']).optional(),
   tags: z.array(z.string()).optional(),
   notes: z.string().optional(),
   relevanceScore: z.number().min(0).max(100).optional(),

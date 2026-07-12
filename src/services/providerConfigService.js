@@ -48,6 +48,39 @@ const PROVIDERS = [
     envConfigured: () => Boolean(config.groqApiKey),
   },
   {
+    providerType: 'chat-research',
+    providerKey: 'xai-grok',
+    displayName: 'xAI Grok',
+    description: 'Supported Grok API provider for autonomous AI research augmentation.',
+    fields: [
+      { key: 'apiKey', label: 'API key', secret: true },
+      { key: 'model', label: 'Model', secret: false, placeholder: config.xaiModel },
+    ],
+    envConfigured: () => Boolean(config.xaiApiKey),
+  },
+  {
+    providerType: 'chat-research',
+    providerKey: 'gemini',
+    displayName: 'Gemini',
+    description: 'Supported Gemini API provider for autonomous AI research augmentation.',
+    fields: [
+      { key: 'apiKey', label: 'API key', secret: true },
+      { key: 'model', label: 'Model', secret: false, placeholder: config.geminiModel },
+    ],
+    envConfigured: () => Boolean(config.geminiApiKey),
+  },
+  {
+    providerType: 'chat-research',
+    providerKey: 'duck-ai',
+    displayName: 'Duck.ai',
+    description: 'Duck.ai public web chat is tracked as a research option, but browser-session scraping is intentionally disabled unless DuckDuckGo provides a sanctioned endpoint.',
+    fields: [
+      { key: 'sanctionedEndpoint', label: 'Sanctioned endpoint URL', secret: false, placeholder: config.duckAiResearch.sanctionedEndpoint || 'No official server endpoint configured' },
+      { key: 'model', label: 'Model', secret: false, placeholder: config.duckAiResearch.model || 'duck.ai web chat' },
+    ],
+    envConfigured: () => Boolean(config.duckAiResearch.sanctionedEndpoint),
+  },
+  {
     providerType: 'market-data',
     providerKey: 'finnhub',
     displayName: 'Finnhub',

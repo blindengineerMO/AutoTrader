@@ -17,6 +17,7 @@ const upsertStmt = db.prepare(`
     discovered_from_url = COALESCE(excluded.discovered_from_url, research_sources.discovered_from_url),
     tags_json = CASE WHEN research_sources.source_type = 'manual' THEN research_sources.tags_json ELSE excluded.tags_json END,
     notes = COALESCE(excluded.notes, research_sources.notes),
+    failure_count = CASE WHEN research_sources.status = 'failed' AND excluded.status = 'active' THEN 0 ELSE research_sources.failure_count END,
     relevance_score = max(research_sources.relevance_score, excluded.relevance_score),
     credibility_score = max(research_sources.credibility_score, excluded.credibility_score),
     updated_at = datetime('now')
@@ -43,6 +44,16 @@ const updateStatsStmt = db.prepare(`
   UPDATE research_sources
   SET success_count = success_count + @successDelta,
       failure_count = failure_count + @failureDelta,
+      status = CASE
+        WHEN @successDelta > 0 THEN 'active'
+        WHEN failure_count + @failureDelta >= 10 AND source_type != 'manual' THEN 'failed'
+        ELSE status
+      END,
+      notes = CASE
+        WHEN failure_count + @failureDelta >= 10 AND source_type != 'manual'
+          THEN 'Auto-retired after 10 failed fetch attempts. It will stay out of active research unless future crawling re-learns it.'
+        ELSE notes
+      END,
       relevance_score = min(100, max(0, relevance_score + @relevanceDelta)),
       credibility_score = min(100, max(0, credibility_score + @credibilityDelta)),
       last_scraped_at = datetime('now'),

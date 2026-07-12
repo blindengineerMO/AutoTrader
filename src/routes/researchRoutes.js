@@ -16,7 +16,7 @@ const router = express.Router();
 
 router.get('/snapshots', (req, res) => {
   const limit = Number(req.query.limit) || 5;
-  res.json(researchRepo.getLatest(limit));
+  res.json(researchRepo.listByUser(req.user.id, limit));
 });
 
 router.get('/plans', (req, res) => {

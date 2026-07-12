@@ -149,10 +149,40 @@ async function runCrawleeResearchDiscovery({ userId, researchRunId, onEvent }) {
     queries: DISCOVERY_QUERIES,
     seedSources,
     onEvent,
-    maxFollowUps: 10,
+    maxFollowUps: 12,
+    maxRequests: 34,
+    minContinuationScore: 2.75,
   });
 
   const observations = [];
+  for (const failure of crawl.failures || []) {
+    const existing = researchSourceRepo.getByUrl(userId, failure.url);
+    const source = existing || researchSourceRepo.upsert({
+      userId,
+      url: failure.url,
+      title: failure.title,
+      sourceType: failure.userData?.type?.includes('google') ? 'search' : 'learned',
+      status: 'active',
+      discoveryMethod: failure.userData?.type || 'crawlee-failed-request',
+      discoveredFromUrl: failure.userData?.discoveredFromUrl,
+      tags: ['failed-fetch'],
+      relevanceScore: 32,
+      credibilityScore: 35,
+      notes: `Fetch failed during autonomous research: ${failure.error}`,
+    });
+    const updated = researchSourceRepo.updateStats(source.id, {
+      success: false,
+      relevanceDelta: -1.4,
+      credibilityDelta: -0.8,
+    });
+    emit(onEvent, 'source-learning', 17, updated.status === 'failed' ? 'warn' : 'debug', 'Tracked failed URL against source memory.', {
+      url: failure.url,
+      failureCount: updated.failure_count,
+      status: updated.status,
+      removalPolicy: updated.failure_count >= 10 ? 'removed from active research until re-learned' : 'will be retried only if future relevance warrants it',
+    });
+  }
+
   for (const link of crawl.discovered) {
     researchSourceRepo.upsert({
       userId,

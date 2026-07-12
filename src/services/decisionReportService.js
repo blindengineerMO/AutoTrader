@@ -28,6 +28,8 @@ function buildDecisionReport({
             actionBias: signal.actionBias,
             localAiScore: signal.localAiScore,
             theme: signal.theme,
+            discovery: signal.discovery || signal.evidence?.discovery || null,
+            chatResearch: signal.chatResearch || signal.evidence?.chatResearch || null,
             newsSentiment: signal.newsSentiment,
             macroRisk: signal.macroRisk,
             consumerBias: signal.consumerBias,

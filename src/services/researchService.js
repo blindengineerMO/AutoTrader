@@ -37,6 +37,7 @@ async function runResearchCycle(watchlist = DEFAULT_WATCHLIST, { userId } = {}) 
   const signals = computeSignals(quotes);
 
   const snapshot = researchRepo.create({
+    userId,
     source,
     summary: {
       watchlist,

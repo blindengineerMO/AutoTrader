@@ -7,6 +7,8 @@ const brainModelService = require('./brainModelService');
 const companyIntelligence = require('./companyIntelligenceService');
 const investorPlaybook = require('./investorPlaybookService');
 const jsonDatasetIndicators = require('./jsonDatasetIndicatorService');
+const companyDiscovery = require('./companyDiscoveryService');
+const chatResearch = require('./chatResearchService');
 const { config } = require('../config');
 const logger = require('../utils/logger');
 
@@ -45,9 +47,21 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
     jsonDatasetIndicators.collectJsonDatasetIndicators({ onEvent }),
   ]);
 
-  const prePlan = buildPrePlan({ watchlist, news, macro, consumer, learned, jsonDatasets });
-  emit(onEvent, 'pre-plan', 38, 'debug', 'Generated first-pass opportunity map from news themes and economic context.', {
+  const initialDiscoveredCompanies = companyDiscovery.discoverCompanies({ news, learned });
+  const chatResearchResult = await chatResearch.runChatResearch({
+    userId,
+    news,
+    learned,
+    macro,
+    consumer,
+    jsonDatasets,
+    discoveredCompanies: initialDiscoveredCompanies,
+    onEvent,
+  });
+  const prePlan = buildPrePlan({ watchlist, news, macro, consumer, learned, jsonDatasets, chatResearch: chatResearchResult, discoveredCompanies: initialDiscoveredCompanies });
+  emit(onEvent, 'pre-plan', 38, 'debug', 'Generated first-pass opportunity map from news themes, crawled company discovery, and economic context.', {
     candidates: prePlan.candidates.map((c) => c.symbol),
+    discoveredCompanies: prePlan.discoveredCompanies.map((c) => ({ symbol: c.symbol, score: c.themeHits, reason: c.discovery?.evidence?.[0]?.reason })),
     themes: prePlan.themes.slice(0, 6),
   });
 
@@ -68,6 +82,7 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
   });
 
   const snapshot = researchRepo.create({
+    userId,
     source: 'autonomous:news-macro-consumer-market',
     summary: {
       watchlist,
@@ -106,6 +121,8 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
         })),
         discovered: learned.discovered,
       },
+      chatResearch: chatResearchResult,
+      discoveredCompanies: prePlan.discoveredCompanies,
       macro,
       consumer,
       prePlan,
@@ -157,7 +174,7 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
 }
 
 async function collectQuotes(symbols, { userId, onEvent }) {
-  const uniqueSymbols = [...new Set(symbols)].slice(0, 20);
+  const uniqueSymbols = [...new Set(symbols)].slice(0, 30);
   const finnhubCredentials = userId ? providerCredentialRepo.getSecret(userId, 'finnhub') : null;
   const finnhubApiKey = finnhubCredentials?.apiKey || config.finnhubApiKey;
   let quotes = [];
@@ -275,7 +292,7 @@ async function collectConsumerSales(onEvent) {
   return payload;
 }
 
-function buildPrePlan({ watchlist, news, macro, consumer, learned, jsonDatasets }) {
+function buildPrePlan({ watchlist, news, macro, consumer, learned, jsonDatasets, chatResearch: chatResearchResult, discoveredCompanies: providedDiscoveredCompanies }) {
   const text = [
     news.items.map((item) => `${item.title} ${item.description}`).join(' '),
     learned.observations.map((item) => `${item.title} ${item.excerpt}`).join(' '),
@@ -304,18 +321,58 @@ function buildPrePlan({ watchlist, news, macro, consumer, learned, jsonDatasets 
       });
     }
   }
+  const discoveredCompanies = providedDiscoveredCompanies || companyDiscovery.discoverCompanies({ news, learned });
+  for (const discovered of discoveredCompanies) {
+    const existing = candidateMap.get(discovered.symbol);
+    candidateMap.set(discovered.symbol, {
+      symbol: discovered.symbol,
+      companyName: discovered.companyName,
+      theme: existing?.theme ? `${existing.theme}+crawled-discovery` : discovered.theme,
+      themeHits: Math.max(existing?.themeHits || 0, discovered.themeHits),
+      discovery: discovered.discovery,
+    });
+  }
+  for (const hint of chatResearchResult?.candidateHints || []) {
+    const existing = candidateMap.get(hint.symbol);
+    const discovery = {
+      method: 'chat-research',
+      tags: ['chat-research'],
+      evidence: [{
+        title: `${hint.providers?.join(', ') || 'chat'} research hint`,
+        url: hint.sourceUrls?.[0],
+        reason: hint.reasons?.[0] || hint.reason,
+      }],
+    };
+    candidateMap.set(hint.symbol, {
+      symbol: hint.symbol,
+      companyName: hint.companyName || existing?.companyName,
+      theme: existing?.theme ? `${existing.theme}+chat-research` : 'chat-research',
+      themeHits: Math.max(existing?.themeHits || 0, 2 + (hint.confidence || 0.5) * 8),
+      discovery: existing?.discovery || discovery,
+      chatResearch: hint,
+    });
+  }
 
   return {
     thesis:
-      'Start broad with US/world news, macro risk, and consumer demand, then narrow into liquid US equities/ETFs for quote-backed evaluation.',
+      'Start broad with US/world news, crawled web intelligence, macro risk, and consumer demand, then let discovered products/companies create quote-backed candidates.',
     macroRiskBias: macro.riskBias,
     consumerBias: consumer.consumerBias,
     jsonDatasetRiskScore: jsonDatasets?.compositeRiskScore,
     jsonDatasetOpportunityScore: jsonDatasets?.opportunityScore,
     learnedSourceCount: learned.learnedSources.length,
     learnedObservationCount: learned.observations.length,
+    discoveredCompanies,
+    chatResearchCandidateCount: chatResearchResult?.candidateHints?.length || 0,
+    chatResearchSourceHintCount: chatResearchResult?.sourceHints?.length || 0,
     themes,
-    candidates: [...candidateMap.values()].slice(0, 20),
+    candidates: [...candidateMap.values()]
+      .sort((a, b) => {
+        const aDiscovery = a.discovery ? 1 : 0;
+        const bDiscovery = b.discovery ? 1 : 0;
+        return bDiscovery - aDiscovery || (b.themeHits || 0) - (a.themeHits || 0);
+      })
+      .slice(0, 30),
   };
 }
 
@@ -378,6 +435,8 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
       localAiScore,
       theme: candidate.theme,
       themeHits: candidate.themeHits,
+      discovery: candidate.discovery || null,
+      chatResearch: candidate.chatResearch || null,
       newsSentiment: sentiment,
       macroRisk: macro.riskBias,
       consumerBias: consumer.consumerBias,
@@ -399,6 +458,8 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
           `Volatility range ${volatilityPct}%`,
           `News and learned-source sentiment score ${sentiment}`,
           `Theme ${candidate.theme} with ${candidate.themeHits || 0} hits`,
+          ...(candidate.discovery?.evidence?.slice(0, 2).map((item) => `Crawled discovery: ${item.reason}`) || []),
+          ...(candidate.chatResearch?.reasons?.slice(0, 2).map((reason) => `Chat research: ${reason}`) || []),
           `Macro bias ${macro.riskBias}`,
           `Consumer bias ${consumer.consumerBias}`,
           `Broker factor intelligence ${factorIntel.compositeScore}`,
@@ -423,6 +484,8 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
           compositeRiskScore: jsonDatasets?.compositeRiskScore,
           opportunityScore: jsonDatasets?.opportunityScore,
         },
+        discovery: candidate.discovery || null,
+        chatResearch: candidate.chatResearch || null,
       },
     });
   }
@@ -483,7 +546,8 @@ function buildResearchNarrative({ scored, news, macro, consumer, learned, invest
 }
 
 function sentimentFor(candidate, text) {
-  const terms = [candidate.symbol.toLowerCase(), ...(THEMES.find((theme) => candidate.theme.includes(theme.id))?.terms || [])];
+  const themeLabel = candidate.theme || '';
+  const terms = [candidate.symbol.toLowerCase(), ...(THEMES.find((theme) => themeLabel.includes(theme.id))?.terms || [])];
   const relevantText = terms.some((term) => text.includes(term)) ? text : '';
   const scope = relevantText || text.slice(0, 2000);
   const positive = POSITIVE_TERMS.reduce((count, term) => count + occurrences(scope, term), 0);
