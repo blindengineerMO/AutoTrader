@@ -1,0 +1,63 @@
+const { test, expect } = require('@playwright/test');
+
+function uniqueEmail() {
+  return `e2e-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.com`;
+}
+
+async function registerAndLogin(page) {
+  const email = uniqueEmail();
+  await page.goto('/login');
+  await page.getByText('Need an account? Register').click();
+  await page.getByLabel('Email').fill(email);
+  await page.getByLabel('Password').fill('password123');
+  await page.getByRole('button', { name: 'Create account' }).click();
+  await expect(page).toHaveURL('/');
+  return email;
+}
+
+test.describe('AutoTrader UI', () => {
+  test('register, land on dashboard, see liquid-glass shell', async ({ page }) => {
+    const email = await registerAndLogin(page);
+    await expect(page.getByText('AUTOTRADER')).toBeVisible();
+    await expect(page.getByText(email)).toBeVisible();
+    await expect(page.getByText('Cash balance')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Kill switch' })).toBeVisible();
+  });
+
+  test('navigate to Settings, toggle trading enabled, and engage kill switch', async ({ page }) => {
+    await registerAndLogin(page);
+    await page.getByRole('link', { name: 'Settings' }).click();
+    await expect(page).toHaveURL('/settings');
+
+    await page.getByRole('checkbox', { name: 'Trading enabled' }).click();
+    await expect(page.getByText('Saved.')).toBeVisible();
+
+    await page.getByRole('button', { name: 'Engage kill switch' }).click();
+    await expect(page.getByRole('button', { name: 'Resume trading' })).toBeVisible();
+  });
+
+  test('navigate to Research view and trigger research-only run', async ({ page }) => {
+    await registerAndLogin(page);
+    await page.getByRole('link', { name: 'Research & Strategy' }).click();
+    await expect(page).toHaveURL('/research');
+
+    await page.getByRole('button', { name: 'Run research only' }).click();
+    await expect(page.getByText('No scored candidates yet.')).not.toBeVisible({ timeout: 15000 });
+  });
+
+  test('navigate to Trade Log view', async ({ page }) => {
+    await registerAndLogin(page);
+    await page.getByRole('link', { name: 'Trade Log' }).click();
+    await expect(page).toHaveURL('/orders');
+    await expect(page.getByText('No orders yet.')).toBeVisible();
+  });
+
+  test('logout returns to login screen and blocks dashboard access', async ({ page }) => {
+    await registerAndLogin(page);
+    await page.getByRole('button', { name: 'Log out' }).click();
+    await expect(page).toHaveURL('/login');
+
+    await page.goto('/');
+    await expect(page).toHaveURL(/\/login/);
+  });
+});

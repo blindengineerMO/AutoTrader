@@ -1,0 +1,63 @@
+require('dotenv').config();
+
+function bool(value, fallback) {
+  if (value === undefined || value === '') return fallback;
+  return value.toLowerCase() === 'true';
+}
+
+function num(value, fallback) {
+  if (value === undefined || value === '') return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+const config = {
+  env: process.env.NODE_ENV || 'development',
+  port: num(process.env.PORT, 3000),
+  logLevel: process.env.LOG_LEVEL || 'info',
+
+  jwtSecret: process.env.JWT_SECRET || '',
+  credentialEncryptionKey: process.env.CREDENTIAL_ENCRYPTION_KEY || '',
+
+  openaiApiKey: process.env.OPENAI_API_KEY || '',
+  openaiModel: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+
+  deepseekApiKey: process.env.DEEPSEEK_API_KEY || '',
+  deepseekModel: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+
+  groqApiKey: process.env.GROQ_API_KEY || '',
+  groqModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+
+  finnhubApiKey: process.env.FINNHUB_API_KEY || '',
+
+  robinhood: {
+    username: process.env.ROBINHOOD_USERNAME || '',
+    password: process.env.ROBINHOOD_PASSWORD || '',
+    mfaSecret: process.env.ROBINHOOD_MFA_SECRET || '',
+  },
+
+  trading: {
+    dailyLossLimitUsd: num(process.env.DAILY_LOSS_LIMIT_USD, 10),
+    maxTradesPerSymbolPer24h: num(process.env.MAX_TRADES_PER_SYMBOL_PER_24H, 3),
+    enabled: bool(process.env.TRADING_ENABLED, false),
+  },
+
+  dbPath: process.env.DB_PATH || require('path').join(__dirname, '..', '..', 'data', 'autotrader.db'),
+};
+
+/**
+ * Checks whether the config has what it needs to actually run a live trading
+ * cycle. The server should still boot without these — only a scheduled/manual
+ * trading cycle should fail loudly when they're missing.
+ */
+function getTradingReadiness() {
+  const missing = [];
+  if (!config.openaiApiKey && !config.deepseekApiKey && !config.groqApiKey) {
+    missing.push('OPENAI_API_KEY or DEEPSEEK_API_KEY or GROQ_API_KEY');
+  }
+  if (!config.robinhood.username) missing.push('ROBINHOOD_USERNAME');
+  if (!config.robinhood.password) missing.push('ROBINHOOD_PASSWORD');
+  return { ready: missing.length === 0, missing };
+}
+
+module.exports = { config, getTradingReadiness };

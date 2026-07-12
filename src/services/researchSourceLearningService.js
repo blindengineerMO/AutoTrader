@@ -1,0 +1,439 @@
+const researchSourceRepo = require('../db/repositories/researchSourceRepo');
+const settingsRepo = require('../db/repositories/settingsRepo');
+const crawleeResearchCrawler = require('./crawleeResearchCrawlerService');
+const logger = require('../utils/logger');
+
+const SEED_SOURCES = [
+  {
+    url: 'https://library.bu.edu/bizdata/free-data',
+    title: 'Boston University Free Business Data Resources',
+    tags: ['seed', 'business-data', 'macro'],
+    credibilityScore: 72,
+  },
+  {
+    url: 'https://www.aeaweb.org/about-aea/committees/economic-statistics/data-resources',
+    title: 'AEA Data Resources for Economists',
+    tags: ['seed', 'economics', 'macro'],
+    credibilityScore: 86,
+  },
+  {
+    url: 'https://www.topdowncharts.com/post/2018/05/12/8-free-macro-and-market-data-sources',
+    title: 'Topdown Charts Free Macro and Market Data Sources',
+    tags: ['seed', 'market-data', 'macro'],
+    credibilityScore: 66,
+  },
+  {
+    url: 'https://yougov.com/en-us/ratings/news-websites',
+    title: 'YouGov Popular News Websites',
+    tags: ['seed', 'news', 'consumer'],
+    credibilityScore: 62,
+  },
+  { url: 'https://fred.stlouisfed.org/', title: 'FRED Economic Data', tags: ['macro', 'market-data'], credibilityScore: 92 },
+  { url: 'https://www.bea.gov/data', title: 'BEA Data', tags: ['macro', 'consumer'], credibilityScore: 88 },
+  { url: 'https://www.bls.gov/data/', title: 'BLS Data', tags: ['labor', 'inflation'], credibilityScore: 88 },
+  { url: 'https://data.worldbank.org/', title: 'World Bank Open Data', tags: ['global', 'macro'], credibilityScore: 88 },
+  { url: 'https://www.imf.org/en/Data', title: 'IMF Data', tags: ['global', 'macro'], credibilityScore: 86 },
+  { url: 'https://stats.oecd.org/', title: 'OECD Data Explorer', tags: ['global', 'macro'], credibilityScore: 84 },
+  { url: 'https://www.bis.org/statistics/', title: 'BIS Statistics', tags: ['credit', 'global'], credibilityScore: 84 },
+  { url: 'https://www.eia.gov/', title: 'EIA Energy Data', tags: ['energy', 'commodities'], credibilityScore: 84 },
+  { url: 'https://www.census.gov/retail/index.html', title: 'Census Retail Sales', tags: ['consumer', 'sales'], credibilityScore: 84 },
+  { url: 'https://www.commoncrawl.org/', title: 'Common Crawl', tags: ['web-index', 'discovery'], credibilityScore: 70 },
+];
+
+const DISCOVERY_QUERIES = [
+  'Whats in the news today',
+  'free macro market data sources investment research',
+  'US retail sales consumer spending data free',
+  'global economic data market indicators free',
+  'stock market sector news earnings macro data free',
+];
+
+const RELEVANCE_TERMS = [
+  'market',
+  'stock',
+  'equity',
+  'macro',
+  'economy',
+  'inflation',
+  'consumer',
+  'retail',
+  'sales',
+  'earnings',
+  'rates',
+  'gdp',
+  'labor',
+  'energy',
+  'commodities',
+  'financial',
+  'data',
+];
+
+async function seedSources(userId) {
+  return SEED_SOURCES.map((source) =>
+    researchSourceRepo.upsert({
+      userId,
+      ...source,
+      sourceType: 'seed',
+      discoveryMethod: 'curated-seed',
+      relevanceScore: source.relevanceScore || 70,
+    })
+  );
+}
+
+async function collectLearnedResearch({ userId, researchRunId, onEvent = () => {} }) {
+  const settings = settingsRepo.get(userId);
+  if (settings?.source_learning_enabled === 0) {
+    emit(onEvent, 'source-learning', 12, 'warn', 'Source learning is disabled in Settings.');
+    return { observations: [], learnedSources: researchSourceRepo.listActiveByUser(userId, 20), discovered: [] };
+  }
+
+  seedSources(userId);
+  emit(onEvent, 'source-learning', 12, 'debug', 'Seeded and loaded research source memory.', {
+    seeds: SEED_SOURCES.length,
+  });
+
+  const crawleeResult = await runCrawleeResearchDiscovery({ userId, researchRunId, onEvent });
+  const discovered = [...crawleeResult.discovered.map((link) => link.url), ...(await discoverSources(userId, onEvent))];
+  const sources = researchSourceRepo.listActiveByUser(userId, 8);
+  const settled = await Promise.allSettled(sources.map(async (source) => {
+    try {
+      const observation = await scrapeSource({ userId, source, researchRunId, onEvent });
+      researchSourceRepo.updateStats(source.id, {
+        success: true,
+        relevanceDelta: observation.score.relevance >= 3 ? 1.2 : 0.2,
+        credibilityDelta: 0.2,
+      });
+
+      for (const link of observation.links.slice(0, 6)) {
+        if (link.score < 2.5) continue;
+        researchSourceRepo.upsert({
+          userId,
+          url: link.url,
+          title: link.text,
+          sourceType: 'learned',
+          discoveryMethod: 'followed-link',
+          discoveredFromUrl: source.url,
+          tags: inferTags(`${link.text} ${link.url}`),
+          relevanceScore: Math.min(85, 42 + link.score * 8),
+          credibilityScore: Math.max(40, source.credibility_score - 8),
+        });
+      }
+      return observation;
+    } catch (err) {
+      researchSourceRepo.updateStats(source.id, { success: false, relevanceDelta: -0.8, credibilityDelta: -0.3 });
+      emit(onEvent, 'source-learning', 18, 'warn', 'Learned source scrape failed; reducing source confidence.', {
+        url: source.url,
+        error: err.message,
+      });
+      return null;
+    }
+  }));
+  const observations = [
+    ...crawleeResult.observations,
+    ...settled
+      .filter((result) => result.status === 'fulfilled' && result.value)
+      .map((result) => result.value),
+  ];
+
+  emit(onEvent, 'source-learning', 22, 'debug', 'Self-learned source scan complete.', {
+    scraped: observations.length,
+    discovered: discovered.length,
+  });
+
+  return { observations, learnedSources: researchSourceRepo.listActiveByUser(userId, 30), discovered };
+}
+
+async function runCrawleeResearchDiscovery({ userId, researchRunId, onEvent }) {
+  const seedSources = researchSourceRepo.listActiveByUser(userId, 10);
+  const crawl = await crawleeResearchCrawler.crawlAutonomousResearch({
+    queries: DISCOVERY_QUERIES,
+    seedSources,
+    onEvent,
+    maxFollowUps: 10,
+  });
+
+  const observations = [];
+  for (const link of crawl.discovered) {
+    researchSourceRepo.upsert({
+      userId,
+      url: link.url,
+      title: link.text,
+      sourceType: 'learned',
+      discoveryMethod: 'crawlee-search-follow-up',
+      discoveredFromUrl: link.discoveredFromUrl,
+      tags: crawleeResearchCrawler.inferTags(`${link.text} ${link.url}`),
+      relevanceScore: Math.min(90, 44 + link.score * 7),
+      credibilityScore: 52,
+    });
+  }
+
+  for (const page of crawl.pages) {
+    const source = researchSourceRepo.upsert({
+      userId,
+      url: page.url,
+      title: page.title,
+      sourceType: page.userData?.type?.includes('google') ? 'search' : 'learned',
+      discoveryMethod: page.userData?.type || 'crawlee-crawl',
+      discoveredFromUrl: page.userData?.discoveredFromUrl,
+      tags: page.score.tags,
+      relevanceScore: Math.min(90, 40 + page.score.relevance * 6),
+      credibilityScore: page.userData?.source?.credibility_score || 50,
+    });
+    researchSourceRepo.recordObservation({
+      userId,
+      sourceId: source?.id,
+      researchRunId,
+      url: page.url,
+      title: page.title,
+      excerpt: page.excerpt,
+      links: page.links,
+      score: {
+        relevance: page.score.relevance,
+        credibility: source?.credibility_score || 50,
+        tags: page.score.tags,
+        crawler: 'crawlee-cheerio',
+      },
+    });
+    observations.push({
+      userId,
+      sourceId: source?.id,
+      researchRunId,
+      url: page.url,
+      title: page.title,
+      excerpt: page.excerpt,
+      links: page.links,
+      score: {
+        relevance: page.score.relevance,
+        credibility: source?.credibility_score || 50,
+        tags: page.score.tags,
+        crawler: 'crawlee-cheerio',
+      },
+    });
+  }
+
+  return { observations, discovered: crawl.discovered };
+}
+
+async function discoverSources(userId, onEvent) {
+  const discovered = [];
+  for (const query of DISCOVERY_QUERIES.slice(0, 2)) {
+    const googleLinks = await discoverFromGoogle(query).catch((err) => {
+      emit(onEvent, 'source-learning', 14, 'warn', 'Google discovery was unavailable; continuing with seed/Common Crawl sources.', {
+        query,
+        error: err.message,
+      });
+      return [];
+    });
+    for (const link of googleLinks.slice(0, 5)) {
+      const score = scoreText(`${link.title} ${link.url}`);
+      if (score < 2) continue;
+      discovered.push(link.url);
+      researchSourceRepo.upsert({
+        userId,
+        url: link.url,
+        title: link.title,
+        sourceType: 'learned',
+        discoveryMethod: 'google-search',
+        tags: inferTags(`${link.title} ${link.url}`),
+        relevanceScore: Math.min(82, 42 + score * 7),
+        credibilityScore: 48,
+      });
+    }
+  }
+
+  const commonCrawlLinks = await discoverFromCommonCrawl('market data sources').catch(() => []);
+  for (const link of commonCrawlLinks.slice(0, 6)) {
+    discovered.push(link.url);
+    researchSourceRepo.upsert({
+      userId,
+      url: link.url,
+      title: link.title || link.url,
+      sourceType: 'learned',
+      discoveryMethod: 'common-crawl-index',
+      tags: inferTags(link.url),
+      relevanceScore: 54,
+      credibilityScore: 46,
+    });
+  }
+  return [...new Set(discovered)];
+}
+
+async function discoverFromGoogle(query) {
+  const url = new URL('https://www.google.com/search');
+  url.searchParams.set('q', query);
+  url.searchParams.set('num', '10');
+  const html = await fetchText(url.toString(), 8000);
+  const links = [];
+  const hrefMatches = [...html.matchAll(/href="([^"]+)"/g)];
+  for (const match of hrefMatches) {
+    let href = decodeHtml(match[1]);
+    if (href.startsWith('/url?')) {
+      const parsed = new URL(href, 'https://www.google.com');
+      href = parsed.searchParams.get('q') || '';
+    }
+    if (!href.startsWith('http') || href.includes('google.com')) continue;
+    links.push({ url: cleanUrl(href), title: hostnameTitle(href) });
+  }
+  return uniqueLinks(links);
+}
+
+async function discoverFromCommonCrawl(query) {
+  const indexList = await fetchJson('https://index.commoncrawl.org/collinfo.json', 8000);
+  const latest = indexList?.[0]?.id;
+  if (!latest) return [];
+  const url = new URL(`https://index.commoncrawl.org/${latest}-index`);
+  url.searchParams.set('url', `*${query.split(' ')[0]}*`);
+  url.searchParams.set('output', 'json');
+  url.searchParams.set('limit', '10');
+  const text = await fetchText(url.toString(), 8000);
+  return text
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        const row = JSON.parse(line);
+        return { url: cleanUrl(row.url), title: hostnameTitle(row.url) };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+async function scrapeSource({ userId, source, researchRunId, onEvent }) {
+  const page = await crawleeResearchCrawler.crawlSingleSource({ source, onEvent });
+  const title = page.title || source.title || hostnameTitle(source.url);
+  const relevance = page.score.relevance;
+  const links = page.links.slice(0, 20);
+  const observation = {
+    userId,
+    sourceId: source.id,
+    researchRunId,
+    url: page.url || source.url,
+    title,
+    excerpt: page.excerpt.slice(0, 900),
+    links,
+    score: {
+      relevance,
+      credibility: source.credibility_score,
+      tags: page.score.tags,
+      crawler: 'crawlee-cheerio',
+    },
+  };
+  researchSourceRepo.recordObservation(observation);
+  return observation;
+}
+
+async function fetchText(url, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 AutoTrader self-learning research bot',
+        Accept: 'text/html,application/xhtml+xml,application/xml,text/plain,*/*',
+      },
+    });
+    if (!res.ok) throw new Error(`${url} failed with ${res.status}`);
+    return await res.text();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchJson(url, timeoutMs) {
+  const text = await fetchText(url, timeoutMs);
+  return JSON.parse(text);
+}
+
+function extractLinks(html, baseUrl) {
+  const links = [];
+  for (const match of html.matchAll(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
+    try {
+      const url = cleanUrl(new URL(decodeHtml(match[1]), baseUrl).toString());
+      if (!url.startsWith('http')) continue;
+      links.push({ url, text: normalizeText(stripTags(decodeHtml(match[2]))).slice(0, 140) || hostnameTitle(url) });
+    } catch {
+      // Ignore malformed hrefs.
+    }
+  }
+  return uniqueLinks(links);
+}
+
+function scoreText(text) {
+  const lowered = String(text || '').toLowerCase();
+  let score = 0;
+  for (const term of RELEVANCE_TERMS) {
+    if (lowered.includes(term)) score += 1;
+  }
+  if (lowered.includes('api') || lowered.includes('csv') || lowered.includes('download')) score += 1.5;
+  if (lowered.includes('subscribe') && lowered.includes('premium')) score -= 1;
+  return Number(score.toFixed(2));
+}
+
+function inferTags(text) {
+  const lowered = String(text || '').toLowerCase();
+  return RELEVANCE_TERMS.filter((term) => lowered.includes(term)).slice(0, 8);
+}
+
+function uniqueLinks(links) {
+  const seen = new Set();
+  return links.filter((link) => {
+    if (!link.url || seen.has(link.url)) return false;
+    seen.add(link.url);
+    return true;
+  });
+}
+
+function cleanUrl(url) {
+  const parsed = new URL(url);
+  parsed.hash = '';
+  for (const key of [...parsed.searchParams.keys()]) {
+    if (key.startsWith('utm_') || key === 'fbclid' || key === 'gclid') parsed.searchParams.delete(key);
+  }
+  return parsed.toString();
+}
+
+function pickTitle(html) {
+  return html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.trim();
+}
+
+function stripTags(value) {
+  return String(value || '').replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]*>/g, ' ');
+}
+
+function normalizeText(value) {
+  return decodeHtml(value).replace(/\s+/g, ' ').trim();
+}
+
+function decodeHtml(value) {
+  return String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
+function hostnameTitle(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return url;
+  }
+}
+
+function emit(onEvent, phase, progress, level, message, data) {
+  onEvent({ phase, progress, level, message, data });
+  if (level === 'warn') logger.warn(message, data || {});
+}
+
+module.exports = {
+  seedSources,
+  collectLearnedResearch,
+  discoverFromGoogle,
+  discoverFromCommonCrawl,
+  scoreText,
+  SEED_SOURCES,
+};

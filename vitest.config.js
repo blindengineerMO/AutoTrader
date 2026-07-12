@@ -1,0 +1,7 @@
+module.exports = {
+  test: {
+    globals: true,
+    environment: 'node',
+    exclude: ['**/node_modules/**', 'tests/e2e/**'],
+  },
+};
