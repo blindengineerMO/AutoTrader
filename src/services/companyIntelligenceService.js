@@ -1,6 +1,9 @@
 const companyIntelligenceRepo = require('../db/repositories/companyIntelligenceRepo');
+const providerCredentialRepo = require('../db/repositories/providerCredentialRepo');
 const webScrapeClient = require('./marketData/webScrapeClient');
+const secEdgarClient = require('./marketData/secEdgarClient');
 const locationAwareness = require('./companyLocationAwarenessService');
+const { config } = require('../config');
 
 const DEFENSE_SYMBOLS = new Set(['LMT', 'RTX', 'NOC', 'GD', 'HII', 'BA', 'ITA', 'XAR']);
 const ENERGY_SYMBOLS = new Set(['XOM', 'CVX', 'COP', 'SLB', 'EOG', 'XLE', 'VDE']);
@@ -14,6 +17,8 @@ async function researchCompanies({ userId, candidates, macro, consumer, quotes =
   const candidateBySymbol = new Map(candidates.map((candidate) => [candidate.symbol, candidate]));
   const population = await collectPopulationContext();
   const oil = await collectOilContext();
+  const secCredentials = userId ? providerCredentialRepo.getSecret(userId, 'sec-edgar') : null;
+  const secUserAgent = secCredentials?.userAgent || config.secEdgarUserAgent;
   const locationIntel = await locationAwareness.researchCompanyLocations({
     userId,
     candidates: uniqueSymbols.map((symbol) => candidateBySymbol.get(symbol) || { symbol }),
@@ -25,6 +30,7 @@ async function researchCompanies({ userId, candidates, macro, consumer, quotes =
   for (const symbol of uniqueSymbols) {
     const quote = quoteBySymbol.get(symbol);
     const history = await webScrapeClient.getHistoricalStats(symbol).catch(() => null);
+    const secSubmissions = await collectSecSubmissionSummary(symbol, { userAgent: secUserAgent, onEvent });
     const summary = buildCompanySummary({
       symbol,
       companyName: candidateBySymbol.get(symbol)?.companyName,
@@ -35,17 +41,19 @@ async function researchCompanies({ userId, candidates, macro, consumer, quotes =
       population,
       oil,
       locationProfile: locationIntel.profilesBySymbol.get(symbol),
+      secSubmissions,
     });
     records.push(companyIntelligenceRepo.save({ userId, symbol, companyName: summary.companyName, summary }));
   }
   emit(onEvent, 'company-intel', 62, 'debug', 'Company intelligence workspace summaries updated.', {
     symbols: uniqueSymbols,
     locationProfiles: locationIntel.profilesBySymbol.size,
+    secFilings: records.filter((record) => record.summary?.secSubmissions?.latestFiling).length,
   });
   return { records, population, oil };
 }
 
-function buildCompanySummary({ symbol, companyName, quote, history, macro, consumer, population, oil, locationProfile }) {
+function buildCompanySummary({ symbol, companyName, quote, history, macro, consumer, population, oil, locationProfile, secSubmissions }) {
   const localEventExposure = locationProfile?.localEventExposure || { score: 50, explanation: 'No location profile available yet.', impacts: [] };
   const factors = {
     warDefense: {
@@ -99,6 +107,7 @@ function buildCompanySummary({ symbol, companyName, quote, history, macro, consu
       impacts: localEventExposure.impacts || [],
       rationale: localEventExposure.explanation,
     },
+    secFilingHistory: buildSecFilingHistoryFactor(secSubmissions),
   };
   const composite = Math.round(Object.values(factors).reduce((sum, factor) => sum + factor.score, 0) / Object.keys(factors).length);
   return {
@@ -108,6 +117,7 @@ function buildCompanySummary({ symbol, companyName, quote, history, macro, consu
     quote,
     history,
     locationProfile,
+    secSubmissions,
     macro: {
       riskBias: macro?.riskBias,
       consumerBias: consumer?.consumerBias,
@@ -121,6 +131,82 @@ function buildCompanySummary({ symbol, companyName, quote, history, macro, consu
       .slice(0, 3)
       .map((factor) => factor.stance)
       .join(', ')}.`,
+  };
+}
+
+async function collectSecSubmissionSummary(symbol, { userAgent, onEvent = () => {} } = {}) {
+  try {
+    if (!userAgent) {
+      emit(onEvent, 'sec-edgar', 57, 'warn', 'SEC filing history skipped; configure SEC_EDGAR_USER_AGENT or the SEC EDGAR provider User-Agent.', {
+        symbol,
+      });
+      return null;
+    }
+    const summary = await secEdgarClient.getSubmissionSummary(symbol, { userAgent });
+    if (summary) {
+      emit(onEvent, 'sec-edgar', 58, 'debug', 'Loaded SEC company submission history.', {
+        symbol,
+        cik: summary.cik,
+        latestForm: summary.latestFiling?.form,
+        filingDate: summary.latestFiling?.filingDate,
+        recentFilings: summary.recentFilings.length,
+      });
+    }
+    return summary;
+  } catch (error) {
+    emit(onEvent, 'sec-edgar', 58, 'warn', 'SEC company submission lookup failed; continuing without filing-history factor.', {
+      symbol,
+      error: error.message,
+    });
+    return null;
+  }
+}
+
+function buildSecFilingHistoryFactor(secSubmissions) {
+  if (!secSubmissions?.latestFiling) {
+    return {
+      score: 44,
+      stance: 'sec-filing-history-unavailable',
+      cik: secSubmissions?.cik || null,
+      latestFilingDate: null,
+      latestForm: null,
+      latestAnnualForm: null,
+      latestQuarterlyForm: null,
+      recentFilingCount: 0,
+      source: secSubmissions?.source || null,
+      rationale: 'No SEC submissions history was available, so regulatory-disclosure recency is treated as a conservative watch item.',
+    };
+  }
+  const latestAge = ageInDays(secSubmissions.latestFiling.filingDate);
+  const periodicAge = ageInDays(secSubmissions.latestPeriodic?.filingDate);
+  const hasRecentPeriodic = Number.isFinite(periodicAge) && periodicAge <= 220;
+  const materialEvents = (secSubmissions.formCounts['8-K'] || 0) + (secSubmissions.formCounts['6-K'] || 0);
+  const score = hasRecentPeriodic ? 68
+    : Number.isFinite(periodicAge) && periodicAge <= 420 ? 56
+      : materialEvents > 0 && Number.isFinite(latestAge) && latestAge <= 60 ? 52
+        : 38;
+  return {
+    score,
+    stance: hasRecentPeriodic ? 'current-sec-periodic-disclosures'
+      : score >= 52 ? 'sec-event-disclosures-watch'
+        : 'stale-or-limited-sec-periodic-disclosures',
+    cik: secSubmissions.cik,
+    entityType: secSubmissions.entityType,
+    sic: secSubmissions.sic,
+    sicDescription: secSubmissions.sicDescription,
+    exchanges: secSubmissions.exchanges,
+    latestFilingDate: secSubmissions.latestFiling.filingDate,
+    latestForm: secSubmissions.latestFiling.form,
+    latestAnnualForm: secSubmissions.latestAnnual?.form || null,
+    latestAnnualFiledAt: secSubmissions.latestAnnual?.filingDate || null,
+    latestQuarterlyForm: secSubmissions.latestQuarterly?.form || null,
+    latestQuarterlyFiledAt: secSubmissions.latestQuarterly?.filingDate || null,
+    latestMaterialEventFiledAt: secSubmissions.latestMaterialEvent?.filingDate || null,
+    recentFilingCount: secSubmissions.recentFilings.length,
+    materialEventCount: materialEvents,
+    formCounts: secSubmissions.formCounts,
+    source: secSubmissions.source,
+    rationale: 'SEC company submissions provide no-key filing history, ticker/CIK identity, exchange metadata, and recent annual/quarterly/material disclosure recency for research scoring.',
   };
 }
 
@@ -223,6 +309,8 @@ function factorScoreForSymbol(companyRecord) {
       compositeScore: 50,
       historicalWatchNormalized: 0.5,
       historicalWatchFactors: [],
+      secFilingNormalized: 0.5,
+      secFilingFactor: null,
       explanations: [],
     };
   }
@@ -230,11 +318,15 @@ function factorScoreForSymbol(companyRecord) {
   const historicalWatchNormalized = historicalWatchFactors.length
     ? Math.max(0, Math.min(1, historicalWatchFactors.reduce((sum, factor) => sum + factor.score, 0) / historicalWatchFactors.length / 100))
     : 0.5;
+  const secFilingFactor = summary.factors.secFilingHistory || null;
+  const secFilingNormalized = secFilingFactor ? Math.max(0, Math.min(1, secFilingFactor.score / 100)) : 0.5;
   return {
     normalized: Math.max(0, Math.min(1, summary.compositeScore / 100)),
     compositeScore: summary.compositeScore,
     historicalWatchNormalized,
     historicalWatchFactors,
+    secFilingNormalized,
+    secFilingFactor,
     explanations: Object.values(summary.factors).map((factor) => `${factor.stance}: ${factor.rationale}`),
   };
 }
@@ -258,9 +350,17 @@ function emit(onEvent, phase, progress, level, message, data) {
   onEvent({ phase, progress, level, message, data });
 }
 
+function ageInDays(dateValue) {
+  if (!dateValue) return null;
+  const timestamp = Date.parse(dateValue);
+  if (!Number.isFinite(timestamp)) return null;
+  return Math.floor((Date.now() - timestamp) / (24 * 60 * 60 * 1000));
+}
+
 module.exports = {
   researchCompanies,
   factorScoreForSymbol,
   buildCompanySummary,
+  buildSecFilingHistoryFactor,
   extractHistoricalWatchFactors,
 };

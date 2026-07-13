@@ -712,6 +712,23 @@ function classifyLocalEvent(text) {
   return null;
 }
 
+const ARTICLE_EVENT_CATEGORIES = [
+  { category: 'war or geopolitical conflict', pattern: /\b(war|conflict|invasion|missile|attack|sanction|red sea)\b/ },
+  { category: 'weather or natural disaster', pattern: /\b(weather|hurricane|storm|flood|wildfire|earthquake|drought|tornado)\b/ },
+  { category: 'crime or retail theft', pattern: /\b(crime|theft|robbery|violence|shoplifting|organized retail crime)\b/ },
+  { category: 'housing or real estate shift', pattern: /\b(housing|mortgage|rent|home sales|building permits|real estate)\b/ },
+  { category: 'sanctions or trade policy', pattern: /\b(tariff|trade war|export controls?|import ban|embargo|trade deal)\b/ },
+  { category: 'regulatory or legal action', pattern: /\b(lawsuit|investigation|antitrust|regulatory action|fine|settlement|subpoena)\b/ },
+  { category: 'supply chain or labor disruption', pattern: /\b(strike|walkout|labor dispute|supply chain disruption|factory shutdown|port congestion)\b/ },
+  { category: 'mergers and acquisitions', pattern: /\b(acquisition|acquires|merger|buyout|takeover|tender offer)\b/ },
+  { category: 'macro or rate policy shift', pattern: /\b(interest rate|federal reserve|rate hike|rate cut|inflation|recession)\b/ },
+];
+
+function classifyArticleEventCategories(text) {
+  const lower = String(text || '').toLowerCase();
+  return ARTICLE_EVENT_CATEGORIES.filter(({ pattern }) => pattern.test(lower)).map(({ category }) => category);
+}
+
 function extractLocationTerms(text) {
   const terms = [
     'United States', 'North America', 'Europe', 'China', 'India', 'Japan', 'Taiwan', 'South Korea',
@@ -902,6 +919,7 @@ module.exports = {
   buildSemanticContext,
   extractLinks,
   extractLocalEventResearchQueries,
+  classifyArticleEventCategories,
   selectPageSubLinks,
   unwrapSearchRedirect,
 };

@@ -17,7 +17,7 @@ const logger = require('../utils/logger');
 /**
  * Runs one full research -> plan -> validate -> execute cycle for a user.
  * `broker` is injected so tests / dry runs can pass a MockBrokerClient
- * instead of a live Robinhood connection. `runResearchCycle`/`generatePlan`
+ * instead of a live Alpaca connection. `runResearchCycle`/`generatePlan`
  * are injectable for the same reason (tests substitute deterministic stubs
  * instead of hitting Finnhub/OpenAI).
  */
@@ -217,7 +217,7 @@ function buildSimulationReason({ settings, broker }) {
       return `${switchName} is engaged (${settings[`${switchName}_reason`] || 'no reason recorded'}), so AutoTrader generated a simulation report only.`;
     }
   }
-  if (broker?.live !== true) return 'A live Robinhood broker connection is unavailable, so AutoTrader generated a simulation report only.';
+  if (broker?.live !== true) return 'A live Alpaca broker connection is unavailable, so AutoTrader generated a simulation report only.';
   return 'Simulation mode was requested explicitly.';
 }
 

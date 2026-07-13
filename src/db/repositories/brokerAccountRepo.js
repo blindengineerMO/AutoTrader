@@ -17,7 +17,7 @@ const updateBalance = db.prepare(`
   WHERE id = ?
 `);
 
-function ensureDefault(userId, broker = 'robinhood') {
+function ensureDefault(userId, broker = 'alpaca') {
   const existing = findDefaultByBroker.get(userId, broker);
   if (existing) return existing;
   const { lastInsertRowid } = insertStmt.run({

@@ -6,12 +6,23 @@ const migrate = require('../db/migrate');
 // their statements at require-time, which fails if tables don't exist yet.
 migrate();
 
-const createApp = require('./app');
-const app = createApp();
-const scheduler = require('../jobs/scheduler');
+const userAdminService = require('../services/userAdminService');
 
-scheduler.scheduleAllUsers();
+async function start() {
+  await userAdminService.ensureDefaultAdmin();
 
-app.listen(config.port, () => {
-  logger.info(`AutoTrader server listening on port ${config.port}`, { env: config.env });
+  const createApp = require('./app');
+  const app = createApp();
+  const scheduler = require('../jobs/scheduler');
+
+  scheduler.scheduleAllUsers();
+
+  app.listen(config.port, () => {
+    logger.info(`AutoTrader server listening on port ${config.port}`, { env: config.env });
+  });
+}
+
+start().catch((err) => {
+  logger.error('AutoTrader server failed to start', { error: err.message, stack: err.stack });
+  process.exit(1);
 });

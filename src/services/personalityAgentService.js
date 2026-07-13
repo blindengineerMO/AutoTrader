@@ -12,6 +12,8 @@ const agentResearch = require('./agentResearchService');
 const agentDecisionTree = require('./agentDecisionTreeService');
 
 const MODERATOR_BRAIN_ID = 'agent.council.moderator';
+const OLLAMA_BRAIN_ID = 'brain.llm.ollama';
+const OLLAMA_BMCL_OPS = ['llm.assist', 'llm.reason', 'llm.research.assist', 'llm.training.suggest', 'llm.analysis.assist'];
 const DEFAULT_CHALLENGE_BASELINE = 65;
 const CONSENSUS_SOURCE_CREDIBILITY_DELTA = 2;
 const CONSENSUS_SOURCE_RELEVANCE_DELTA = 1;
@@ -193,7 +195,7 @@ function ensureDefaultAgents(userId) {
   return DEFAULT_PERSONAS.map((profile) => {
     const existing = tradingAgentRepo.getBySlug(userId, profile.slug);
     if (existing) {
-      const updated = ensureDecisionFramework(existing);
+      const updated = ensureAgentRuntimeMetadata(existing);
       agentWorkspace.ensureWorkspace(updated);
       return updated;
     }
@@ -203,7 +205,8 @@ function ensureDefaultAgents(userId) {
 
 function listAgents(userId) {
   ensureDefaultAgents(userId);
-  return agentWorkspace.syncAgents(tradingAgentRepo.listAgents(userId));
+  const agents = tradingAgentRepo.listAgents(userId).map(ensureAgentRuntimeMetadata);
+  return agentWorkspace.syncAgents(agents);
 }
 
 function createAgent(userId, name) {
@@ -247,9 +250,10 @@ function updateAgent(userId, id, patch = {}) {
     sourceUrls: Array.isArray(patch.sourceUrls) ? normalizeUrls(patch.sourceUrls) : existing.sourceUrls,
     model: objectOrExisting(patch.model, existing.model),
   });
-  registerMeshAgent(next);
-  persistAgentSources(userId, next);
-  return { ...next, workspace: agentWorkspace.ensureWorkspace(next) };
+  const ready = ensureAgentOllamaGuidance(next);
+  registerMeshAgent(ready);
+  persistAgentSources(userId, ready);
+  return { ...ready, workspace: agentWorkspace.ensureWorkspace(ready) };
 }
 
 function deleteAgent(userId, id) {
@@ -410,6 +414,7 @@ function saveProfile(userId, profile, profileSource) {
       style: profile.style,
       profileSource,
       disclaimer: 'This is a simulated investment-style persona based on public sources, not an endorsement or claim about the real person making trades.',
+      localAiCollaboration: buildOllamaCollaborationGuidance(),
     },
     bias: profile.bias,
     sourceUrls: profile.sourceUrls,
@@ -417,9 +422,10 @@ function saveProfile(userId, profile, profileSource) {
       modelType: 'personality-bias-v1',
       createdAt: new Date().toISOString(),
       promptSeed: `${profile.name} ${profile.archetype} ${profile.style?.join(' ')}`,
+      ...(profile.model || {}),
       decisionFrameworkVersion: agentDecisionTree.VERSION,
       decisionFramework: agentDecisionTree.buildDecisionFramework(profile),
-      ...(profile.model || {}),
+      bmcl: buildOllamaBmclModelGuidance(profile.model?.bmcl),
     },
   });
   registerMeshAgent(agent);
@@ -606,10 +612,17 @@ const LOCAL_LEARNING_MAX_DELTA = 0.05;
 // incrementally adapt between the expensive nightly full persona refreshes.
 async function applyLocalLearningPass({ userId, agents, allRecommendations, consensus, onEvent = () => {} }) {
   const providers = aiClient.buildProviders(userId);
-  const systemPrompt = 'You tune small numeric bias weights for simulated trading personas based on a council debate outcome. Respond with strict JSON only.';
+  const systemPrompt = `You tune small numeric bias weights for simulated trading personas based on a council debate outcome. Respond with strict JSON only. Personality agents can ask ${OLLAMA_BRAIN_ID} over BMCL for reasoning, research interpretation, analysis, and self-improvement support when they need local LLM help.`;
   const userPrompt = JSON.stringify({
     instructions: 'Given these agent recommendations and the consensus outcome, propose small bias adjustments (delta between -0.05 and 0.05) for agents whose thesis was strongly confirmed or contradicted. Respond as {"biasAdjustments": [{"agentId": string, "sectorOrFactor": string, "delta": number, "rationale": string}]}. Return at most 5 adjustments.',
-    agents: agents.map((agent) => ({ id: agent.id, name: agent.name, bias: agent.bias })),
+    bmclLocalAi: buildOllamaCollaborationGuidance(),
+    agents: agents.map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      brainId: agent.brain_id,
+      bias: agent.bias,
+      localAiCollaboration: agent.persona?.localAiCollaboration || buildOllamaCollaborationGuidance(),
+    })),
     recommendations: allRecommendations.map(stripRecommendationForFrame),
     consensus: { finalRecommendations: consensus.finalRecommendations },
   });
@@ -645,6 +658,74 @@ function ensureDecisionFramework(agent) {
   }) || agent;
 }
 
+function ensureAgentRuntimeMetadata(agent) {
+  let updated = ensureDecisionFramework(agent);
+  updated = ensureAgentOllamaGuidance(updated);
+  registerMeshAgent(updated);
+  return updated;
+}
+
+function ensureAgentOllamaGuidance(agent) {
+  if (!agent) return agent;
+  const currentPersona = agent.persona || {};
+  const currentModel = agent.model || {};
+  const collaboration = currentPersona.localAiCollaboration || {};
+  const bmcl = currentModel.bmcl || {};
+  const hasPersonaGuidance = collaboration.brainId === OLLAMA_BRAIN_ID
+    && OLLAMA_BMCL_OPS.every((op) => (collaboration.supportedOps || []).includes(op));
+  const hasModelGuidance = bmcl.primaryLocalLlmBrainId === OLLAMA_BRAIN_ID
+    && OLLAMA_BMCL_OPS.every((op) => (bmcl.requestOps || bmcl.canAsk || []).includes(op));
+  if (hasPersonaGuidance && hasModelGuidance) return agent;
+
+  return tradingAgentRepo.updateAgent(agent.user_id, agent.id, {
+    persona: {
+      ...currentPersona,
+      localAiCollaboration: buildOllamaCollaborationGuidance(currentPersona.localAiCollaboration),
+    },
+    model: {
+      ...currentModel,
+      bmcl: buildOllamaBmclModelGuidance(currentModel.bmcl),
+    },
+  }) || agent;
+}
+
+function buildOllamaCollaborationGuidance(existing = {}) {
+  return {
+    ...existing,
+    brainId: OLLAMA_BRAIN_ID,
+    protocol: 'BMCL/1.0',
+    transport: 'brainMesh.ask',
+    supportedOps: OLLAMA_BMCL_OPS,
+    useFor: {
+      reasoning: 'Ask llm.reason for evidence-based causal reasoning before strengthening or weakening a thesis.',
+      research: 'Ask llm.research.assist to interpret crawler/news/page evidence, identify gaps, and suggest source or candidate hints.',
+      analysis: 'Ask llm.analysis.assist for compact analysis of company, macro, risk, and agent-council evidence.',
+      selfImprovement: 'Ask llm.training.suggest for feature, label, memory, and bias-tuning suggestions after evaluations.',
+    },
+    guardrails: [
+      'Do not place trades through BMCL.',
+      'Do not send credentials or secrets.',
+      'Keep requests compact, auditable, and based on supplied evidence or approved research tools.',
+    ],
+  };
+}
+
+function buildOllamaBmclModelGuidance(existing = {}) {
+  return {
+    ...existing,
+    protocol: 'BMCL/1.0',
+    primaryLocalLlmBrainId: OLLAMA_BRAIN_ID,
+    requestOps: OLLAMA_BMCL_OPS,
+    canAsk: OLLAMA_BMCL_OPS,
+    conversationPattern: {
+      reasoning: { to: [OLLAMA_BRAIN_ID], op: 'llm.reason' },
+      research: { to: [OLLAMA_BRAIN_ID], op: 'llm.research.assist' },
+      analysis: { to: [OLLAMA_BRAIN_ID], op: 'llm.analysis.assist' },
+      selfImprovement: { to: [OLLAMA_BRAIN_ID], op: 'llm.training.suggest' },
+    },
+  };
+}
+
 function persistAgentSources(userId, agent) {
   for (const url of agent.sourceUrls || []) {
     researchSourceRepo.upsert({
@@ -662,15 +743,19 @@ function persistAgentSources(userId, agent) {
 }
 
 function registerMeshAgent(agent) {
+  const localAiCollaboration = agent.persona?.localAiCollaboration || buildOllamaCollaborationGuidance();
   brainMesh.registerAgent({
     id: agent.brain_id,
-    userId: agent.user_id,
+    userId: null,
     role: 'personality-trading-agent',
-    capabilities: ['agent.thesis.proposed', 'agent.challenge.raised', 'agent.vote.cast', 'mesh.status'],
+    capabilities: ['agent.thesis.proposed', 'agent.challenge.raised', 'agent.vote.cast', 'mesh.status', 'bmcl.ask.ollama'],
     metadata: {
-      agentId: agent.id,
       name: agent.name,
+      sharedPersonaSlug: agent.slug,
+      sharedAcrossUsers: true,
       archetype: agent.persona?.archetype,
+      localAiCollaboration,
+      userScopedState: 'trading_agents rows store per-user status, bias, source URLs, workspace history, and council recommendations; BMCL brain identity is shared by slug.',
     },
   });
 }
@@ -703,6 +788,7 @@ function summarizeAgent(agent) {
     brainId: agent.brain_id,
     archetype: agent.persona?.archetype,
     style: agent.persona?.style || [],
+    localAiCollaboration: agent.persona?.localAiCollaboration || buildOllamaCollaborationGuidance(),
   };
 }
 

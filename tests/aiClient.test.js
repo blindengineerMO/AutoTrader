@@ -1,4 +1,11 @@
-const { generateRulesBasedPlan, buildProviders } = require('../src/services/strategy/aiClient');
+const {
+  generateRulesBasedPlan,
+  buildProviders,
+  buildTradingPlanPrompt,
+  requestStructuredCompletion,
+  estimatePromptTokens,
+} = require('../src/services/strategy/aiClient');
+const { config } = require('../src/config');
 
 function signal(overrides) {
   return { symbol: 'AAPL', changePct: 2, volatilityPct: 1, momentum: 'bullish', localAiScore: 80, price: 100, ...overrides };
@@ -94,5 +101,78 @@ describe('aiClient.buildProviders', () => {
     const providers = buildProviders(null);
     expect(providers.length).toBeGreaterThan(0);
     expect(providers[providers.length - 1].provider).toBe('ollama');
+  });
+});
+
+describe('aiClient local-model context compaction', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    config.ollamaMaxPromptTokens = 4096;
+  });
+
+  it('builds a compact trading-plan prompt instead of serializing massive research summaries', () => {
+    config.ollamaMaxPromptTokens = 1400;
+    const huge = 'crawler evidence '.repeat(15000);
+    const prompt = buildTradingPlanPrompt({
+      researchSnapshot: {
+        id: 42,
+        source: 'autonomous',
+        signals: [
+          signal({
+            symbol: 'NVDA',
+            evidence: {
+              explanation: [huge, 'GPU demand remains relevant.'],
+              brokerFactors: { raw: huge },
+            },
+          }),
+          signal({ symbol: 'MSFT', localAiScore: 79 }),
+        ],
+        summary: {
+          learnedResearch: { observations: [{ title: 'Huge page', excerpt: huge }] },
+          reportNarrative: {
+            summary: `Important concise summary. ${huge}`,
+            topCandidates: [{ symbol: 'NVDA', score: 91, bias: 'buy', reasons: [huge] }],
+          },
+          chatResearch: {
+            summary: huge,
+            candidateHints: [{ symbol: 'NVDA', companyName: 'NVIDIA', confidence: 0.9, reason: huge }],
+          },
+          sourceStack: Array.from({ length: 50 }, (_, index) => ({ name: `${huge}-${index}`, type: 'learned' })),
+        },
+      },
+      accountState: { cashUsd: 100 },
+      recentTradeCounts: {},
+    });
+
+    expect(estimatePromptTokens('', prompt)).toBeLessThanOrEqual(1400);
+    expect(prompt).toContain('NVDA');
+    expect(prompt.length).toBeLessThan(5600);
+    expect(prompt).not.toContain('learnedResearch');
+  });
+
+  it('compacts oversized direct Ollama structured-completion prompts before sending them', async () => {
+    config.ollamaMaxPromptTokens = 1200;
+    const create = vi.fn(async (request) => {
+      const userMessage = request.messages.find((message) => message.role === 'user')?.content || '';
+      expect(estimatePromptTokens('system', userMessage)).toBeLessThanOrEqual(1200);
+      expect(userMessage).toContain('compacted');
+      return { choices: [{ message: { content: '{"actions":[],"overallRationale":"ok"}' } }] };
+    });
+
+    const events = [];
+    const result = await requestStructuredCompletion({
+      providers: [{
+        provider: 'ollama',
+        model: 'deepseek-r1:latest',
+        client: { chat: { completions: { create } } },
+      }],
+      systemPrompt: 'system',
+      userPrompt: JSON.stringify({ giant: 'x '.repeat(50000), keep: 'small' }),
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result.provider).toBe('ollama');
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.message.includes('Compacted oversized local Ollama strategy prompt'))).toBe(true);
   });
 });

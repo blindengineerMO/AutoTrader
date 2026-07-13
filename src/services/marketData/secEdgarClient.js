@@ -3,6 +3,7 @@ const { config } = require('../../config');
 
 const TICKERS_URL = 'https://www.sec.gov/files/company_tickers.json';
 const FACTS_URL = (cik) => `https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`;
+const SUBMISSIONS_URL = (cik) => `https://data.sec.gov/submissions/CIK${cik}.json`;
 
 let tickerCache = null;
 let tickerCacheAt = 0;
@@ -23,8 +24,8 @@ const CONCEPTS = {
   CommonStockSharesOutstanding: 'instant',
 };
 
-function requireUserAgent() {
-  const userAgent = config.secEdgarUserAgent;
+function requireUserAgent(overrideUserAgent) {
+  const userAgent = overrideUserAgent || config.secEdgarUserAgent;
   if (!userAgent) {
     throw new Error(
       'SEC_EDGAR_USER_AGENT is not configured. SEC requires a descriptive User-Agent ' +
@@ -35,11 +36,11 @@ function requireUserAgent() {
   return userAgent;
 }
 
-async function fetchJson(url) {
-  const userAgent = requireUserAgent();
+async function fetchJson(url, { userAgent } = {}) {
+  const resolvedUserAgent = requireUserAgent(userAgent);
   const res = await fetch(url, {
     headers: {
-      'User-Agent': userAgent,
+      'User-Agent': resolvedUserAgent,
       Accept: 'application/json',
     },
   });
@@ -47,10 +48,10 @@ async function fetchJson(url) {
   return res.json();
 }
 
-async function getCompanyTickers({ force = false } = {}) {
+async function getCompanyTickers({ force = false, userAgent } = {}) {
   const now = Date.now();
   if (!force && tickerCache && now - tickerCacheAt < TICKER_CACHE_TTL_MS) return tickerCache;
-  const data = await fetchJson(TICKERS_URL);
+  const data = await fetchJson(TICKERS_URL, { userAgent });
   const map = new Map();
   for (const entry of Object.values(data || {})) {
     if (!entry?.ticker || entry.cik_str === undefined) continue;
@@ -65,16 +66,36 @@ async function getCompanyTickers({ force = false } = {}) {
 }
 
 function padCik(cikStr) {
-  return String(cikStr).padStart(10, '0');
+  return String(cikStr).replace(/^CIK/i, '').replace(/\D/g, '').padStart(10, '0');
 }
 
-async function getCik(symbol) {
-  const tickers = await getCompanyTickers();
+async function getCik(symbol, options = {}) {
+  const tickers = await getCompanyTickers(options);
   return tickers.get(String(symbol).toUpperCase()) || null;
 }
 
-async function getCompanyFacts(cik) {
-  return fetchJson(FACTS_URL(cik));
+async function getCompanyFacts(cik, options = {}) {
+  return fetchJson(FACTS_URL(padCik(cik)), options);
+}
+
+async function getCompanySubmissions(cik, options = {}) {
+  return fetchJson(SUBMISSIONS_URL(padCik(cik)), options);
+}
+
+async function getSubmissionsBySymbol(symbol, options = {}) {
+  const identity = await getCik(symbol, options);
+  if (!identity) {
+    logger.warn('No SEC EDGAR CIK found for submissions lookup', { symbol });
+    return null;
+  }
+  const submissions = await getCompanySubmissions(identity.cik, options);
+  return { identity, submissions };
+}
+
+async function getSubmissionSummary(symbol, options = {}) {
+  const result = await getSubmissionsBySymbol(symbol, options);
+  if (!result) return null;
+  return summarizeSubmissions(result.submissions, { symbol, identity: result.identity });
 }
 
 /**
@@ -93,13 +114,13 @@ function pickLatestFact(companyFacts, concept) {
   return sorted[0] || null;
 }
 
-async function getFundamentalFacts(symbol) {
-  const identity = await getCik(symbol);
+async function getFundamentalFacts(symbol, options = {}) {
+  const identity = await getCik(symbol, options);
   if (!identity) {
     logger.warn('No SEC EDGAR CIK found for symbol', { symbol });
     return null;
   }
-  const companyFacts = await getCompanyFacts(identity.cik);
+  const companyFacts = await getCompanyFacts(identity.cik, options);
   const facts = {};
   let latestFiledAt = null;
   for (const [concept, kind] of Object.entries(CONCEPTS)) {
@@ -118,10 +139,91 @@ async function getFundamentalFacts(symbol) {
   };
 }
 
+function summarizeSubmissions(submissions, { symbol, identity, maxFilings = 40 } = {}) {
+  const recentFilings = normalizeRecentFilings(submissions?.filings?.recent, submissions?.cik).slice(0, maxFilings);
+  const formCounts = recentFilings.reduce((counts, filing) => {
+    counts[filing.form] = (counts[filing.form] || 0) + 1;
+    return counts;
+  }, {});
+  const latestByForm = {};
+  for (const form of ['10-K', '10-Q', '8-K', '20-F', '40-F', '6-K', 'S-1', 'DEF 14A', '13F-HR']) {
+    latestByForm[form] = recentFilings.find((filing) => filing.form === form) || null;
+  }
+  const latestFiling = recentFilings[0] || null;
+  const latestPeriodic = latestByForm['10-Q'] || latestByForm['10-K'] || latestByForm['20-F'] || latestByForm['40-F'] || null;
+  return {
+    symbol: String(symbol || submissions?.tickers?.[0] || '').toUpperCase() || null,
+    cik: padCik(submissions?.cik || identity?.cik || ''),
+    companyName: submissions?.name || identity?.title || null,
+    entityType: submissions?.entityType || null,
+    sic: submissions?.sic || null,
+    sicDescription: submissions?.sicDescription || null,
+    tickers: submissions?.tickers || (symbol ? [String(symbol).toUpperCase()] : []),
+    exchanges: submissions?.exchanges || [],
+    fiscalYearEnd: submissions?.fiscalYearEnd || null,
+    stateOfIncorporation: submissions?.stateOfIncorporation || null,
+    flags: submissions?.flags || '',
+    formerNames: (submissions?.formerNames || []).slice(0, 8),
+    latestFiling,
+    latestPeriodic,
+    latestAnnual: latestByForm['10-K'] || latestByForm['20-F'] || latestByForm['40-F'] || null,
+    latestQuarterly: latestByForm['10-Q'] || null,
+    latestMaterialEvent: latestByForm['8-K'] || latestByForm['6-K'] || null,
+    formCounts,
+    recentFilings,
+    olderSubmissionFiles: (submissions?.filings?.files || []).slice(0, 12),
+    source: {
+      name: 'SEC company submissions API',
+      url: SUBMISSIONS_URL(padCik(submissions?.cik || identity?.cik || '')),
+      tickerDirectoryUrl: TICKERS_URL,
+    },
+  };
+}
+
+function normalizeRecentFilings(recent = {}, cik) {
+  const accessionNumbers = recent.accessionNumber || [];
+  const keys = [
+    'accessionNumber',
+    'filingDate',
+    'reportDate',
+    'acceptanceDateTime',
+    'act',
+    'form',
+    'fileNumber',
+    'filmNumber',
+    'items',
+    'size',
+    'isXBRL',
+    'isInlineXBRL',
+    'primaryDocument',
+    'primaryDocDescription',
+  ];
+  return accessionNumbers.map((_, index) => {
+    const filing = Object.fromEntries(keys.map((key) => [key, recent[key]?.[index] ?? null]));
+    const accessionNoDashes = String(filing.accessionNumber || '').replace(/-/g, '');
+    const cikNoZeros = String(cik || '').replace(/^0+/, '');
+    const primaryDocument = filing.primaryDocument || '';
+    return {
+      ...filing,
+      size: Number(filing.size || 0),
+      isXBRL: Boolean(filing.isXBRL),
+      isInlineXBRL: Boolean(filing.isInlineXBRL),
+      filingUrl: cikNoZeros && accessionNoDashes && primaryDocument
+        ? `https://www.sec.gov/Archives/edgar/data/${cikNoZeros}/${accessionNoDashes}/${primaryDocument}`
+        : null,
+    };
+  });
+}
+
 module.exports = {
   getCompanyTickers,
   getCik,
   getCompanyFacts,
+  getCompanySubmissions,
+  getSubmissionsBySymbol,
+  getSubmissionSummary,
+  summarizeSubmissions,
+  normalizeRecentFilings,
   getFundamentalFacts,
   pickLatestFact,
   CONCEPTS,

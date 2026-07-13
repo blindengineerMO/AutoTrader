@@ -42,11 +42,23 @@ describe('personalityAgentService', () => {
 
     const seeded = personalityAgents.ensureDefaultAgents(user.id);
     expect(seeded.map((agent) => agent.slug)).toEqual(expect.arrayContaining(['bill-gates', 'donald-trump', 'nancy-pelosi', 'jeff-bezos', 'elon-musk']));
+    const billGates = seeded.find((agent) => agent.slug === 'bill-gates');
+    expect(billGates.persona.localAiCollaboration.brainId).toBe('brain.llm.ollama');
+    expect(billGates.persona.localAiCollaboration.supportedOps).toEqual(expect.arrayContaining(['llm.reason', 'llm.research.assist', 'llm.training.suggest', 'llm.analysis.assist']));
+    expect(billGates.model.bmcl.primaryLocalLlmBrainId).toBe('brain.llm.ollama');
+    expect(billGates.model.bmcl.conversationPattern.selfImprovement).toEqual({ to: ['brain.llm.ollama'], op: 'llm.training.suggest' });
+
+    const billMeshAgent = brainMesh.listAgents(user.id).find((agent) => agent.id === billGates.brain_id);
+    expect(billMeshAgent.user_id).toBeNull();
+    expect(billMeshAgent.capabilities).toContain('bmcl.ask.ollama');
+    expect(billMeshAgent.metadata.localAiCollaboration.brainId).toBe('brain.llm.ollama');
+    expect(billMeshAgent.metadata.sharedAcrossUsers).toBe(true);
 
     const custom = personalityAgents.createAgent(user.id, 'Ada Lovelace');
     expect(custom.sourceUrls.some((url) => url.includes('google.com/search'))).toBe(true);
     expect(custom.workspace?.spec).toBeTruthy();
     expect(fs.existsSync(custom.workspace.spec)).toBe(true);
+    expect(custom.persona.localAiCollaboration.supportedOps).toContain('llm.reason');
 
     const updated = personalityAgents.updateAgent(user.id, custom.id, {
       status: 'paused',
@@ -77,6 +89,35 @@ describe('personalityAgentService', () => {
     const deleted = personalityAgents.deleteAgent(user.id, custom.id);
     expect(deleted.status).toBe('deleted');
     expect(personalityAgents.listAgents(user.id).some((agent) => agent.id === custom.id)).toBe(false);
+  });
+
+  it('shares the same personality BrainMesh agent across users while keeping user-scoped records', () => {
+    const alice = userRepo.createUser({
+      email: `shared-agent-alice-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+    const bob = userRepo.createUser({
+      email: `shared-agent-bob-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+
+    const [aliceBill] = personalityAgents.ensureDefaultAgents(alice.id).filter((agent) => agent.slug === 'bill-gates');
+    const [bobBill] = personalityAgents.ensureDefaultAgents(bob.id).filter((agent) => agent.slug === 'bill-gates');
+
+    expect(aliceBill.id).not.toBe(bobBill.id);
+    expect(aliceBill.user_id).toBe(alice.id);
+    expect(bobBill.user_id).toBe(bob.id);
+    expect(aliceBill.brain_id).toBe('agent.personality.bill-gates');
+    expect(bobBill.brain_id).toBe('agent.personality.bill-gates');
+
+    const sharedMeshAgents = brainMesh.listAgents(alice.id).filter((agent) => agent.id === 'agent.personality.bill-gates');
+    expect(sharedMeshAgents).toHaveLength(1);
+    expect(sharedMeshAgents[0].user_id).toBeNull();
+    expect(sharedMeshAgents[0].metadata.sharedPersonaSlug).toBe('bill-gates');
   });
 
   it('discounts a recommendation weight in buildConsensus when its thesis lost a council challenge', () => {

@@ -1,6 +1,7 @@
 const express = require('express');
 const { z } = require('zod');
 const authService = require('../services/authService');
+const requireAuth = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -29,6 +30,10 @@ router.post('/login', async (req, res) => {
   } catch (err) {
     res.status(401).json({ error: err.message });
   }
+});
+
+router.get('/me', requireAuth, (req, res) => {
+  res.json({ user: req.user });
 });
 
 module.exports = router;

@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS broker_accounts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  broker TEXT NOT NULL DEFAULT 'robinhood',
+  broker TEXT NOT NULL DEFAULT 'alpaca',
   account_label TEXT NOT NULL DEFAULT 'default',
   status TEXT NOT NULL DEFAULT 'not_connected',
   cash_balance_usd REAL NOT NULL DEFAULT 0,

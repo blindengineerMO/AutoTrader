@@ -9,6 +9,7 @@ const {
   extractDuckDuckGoResultLinks,
   extractLinks,
   selectPageSubLinks,
+  classifyArticleEventCategories,
 } = require('../src/services/crawleeResearchCrawlerService');
 
 describe('crawleeResearchCrawlerService relevance scoring', () => {
@@ -140,5 +141,18 @@ describe('crawleeResearchCrawlerService relevance scoring', () => {
       depth: 2,
     });
     expect(selected.some((link) => link.url.includes('/privacy'))).toBe(false);
+  });
+
+  it('classifies an article into multiple relevant event categories, not just the first match', () => {
+    const categories = classifyArticleEventCategories(
+      'A missile attack has escalated the war, prompting new tariffs and export controls on affected suppliers.'
+    );
+
+    expect(categories).toContain('war or geopolitical conflict');
+    expect(categories).toContain('sanctions or trade policy');
+  });
+
+  it('returns no categories for a routine, non-eventful article', () => {
+    expect(classifyArticleEventCategories('Local bakery celebrates its tenth anniversary with a community bake sale.')).toEqual([]);
   });
 });

@@ -44,9 +44,34 @@ describe('providerConfigService', () => {
     const providers = providerConfigService.listProviders(user.id);
     const keys = providers.map((provider) => provider.providerKey);
 
-    expect(keys).toEqual(expect.arrayContaining(['openalex', 'openfda', 'reliefweb', 'nws-weather']));
+    expect(keys).toEqual(expect.arrayContaining(['sec-edgar', 'census-bfs', 'census-bds', 'gdelt', 'openalex', 'openfda', 'reliefweb', 'nws-weather']));
+    expect(providers.find((provider) => provider.providerKey === 'sec-edgar').fields[0].key).toBe('userAgent');
+    expect(providers.find((provider) => provider.providerKey === 'census-bfs').fields[0].key).toBe('apiKey');
+    expect(providers.find((provider) => provider.providerKey === 'census-bds').fields[0].key).toBe('apiKey');
+    expect(providers.find((provider) => provider.providerKey === 'gdelt').fields.map((field) => field.key)).toEqual(
+      expect.arrayContaining(['enabled', 'maxRecords'])
+    );
     expect(providers.find((provider) => provider.providerKey === 'reliefweb').fields[0].key).toBe('appName');
     expect(providers.find((provider) => provider.providerKey === 'nws-weather').fields[0].key).toBe('userAgent');
+  });
+
+  it('exposes Alpaca as the broker provider', () => {
+    const user = userRepo.createUser({
+      email: `alpaca-provider-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+
+    const providers = providerConfigService.listProviders(user.id);
+    const alpaca = providers.find((provider) => provider.providerKey === 'alpaca');
+
+    expect(alpaca).toBeDefined();
+    expect(alpaca.providerType).toBe('broker');
+    expect(alpaca.displayName).toBe('Alpaca');
+    expect(alpaca.fields.map((field) => field.key)).toEqual(
+      expect.arrayContaining(['keyId', 'secretKey', 'paper', 'baseUrl'])
+    );
   });
 
   it('lists the local Ollama provider as env-configured by default (no API key required)', () => {

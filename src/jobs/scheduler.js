@@ -8,7 +8,7 @@ const watcherBehaviorService = require('../services/watcherBehaviorService');
 const simulationModeService = require('../services/simulationModeService');
 const personalityAgents = require('../services/personalityAgentService');
 const MockBrokerClient = require('../services/broker/MockBrokerClient');
-const RobinhoodBrokerClient = require('../services/broker/RobinhoodBrokerClient');
+const AlpacaBrokerClient = require('../services/broker/AlpacaBrokerClient');
 const settingsRepo = require('../db/repositories/settingsRepo');
 const userRepo = require('../db/repositories/userRepo');
 const researchRunRepo = require('../db/repositories/researchRunRepo');
@@ -49,18 +49,17 @@ function watcherCycleHoursFromCron(cronExpression) {
 }
 
 async function resolveBroker(userId) {
-  const robinhood = new RobinhoodBrokerClient({ userId });
-  if (!robinhood.isConfigured()) {
-    logger.warn('Robinhood not configured — using MockBrokerClient simulation for this cycle');
-    return { broker: new MockBrokerClient(), modeReason: 'Robinhood credentials are not configured.' };
+  const alpaca = new AlpacaBrokerClient({ userId });
+  if (!alpaca.isConfigured()) {
+    logger.warn('Alpaca not configured - using MockBrokerClient simulation for this cycle');
+    return { broker: new MockBrokerClient(), modeReason: 'Alpaca credentials are not configured.' };
   }
   try {
-    await robinhood.connect();
-    robinhood.live = true;
-    return { broker: robinhood, modeReason: null };
+    await alpaca.connect();
+    return { broker: alpaca, modeReason: null };
   } catch (err) {
-    logger.warn('Robinhood live connection unavailable — using MockBrokerClient simulation for this cycle', { error: err.message });
-    return { broker: new MockBrokerClient(), modeReason: `Robinhood live connection unavailable: ${err.message}` };
+    logger.warn('Alpaca live connection unavailable - using MockBrokerClient simulation for this cycle', { error: err.message });
+    return { broker: new MockBrokerClient(), modeReason: `Alpaca live connection unavailable: ${err.message}` };
   }
 }
 

@@ -15,6 +15,7 @@ const companyRoutes = require('../routes/companyRoutes');
 const brainMeshRoutes = require('../routes/brainMeshRoutes');
 const agentRoutes = require('../routes/agentRoutes');
 const watcherAgentRoutes = require('../routes/watcherAgentRoutes');
+const adminRoutes = require('../routes/adminRoutes');
 
 function createApp() {
   const app = express();
@@ -40,6 +41,7 @@ function createApp() {
   app.use('/api/brain-mesh', requireAuth, brainMeshRoutes);
   app.use('/api/agents', requireAuth, agentRoutes);
   app.use('/api/watcher-agents', requireAuth, watcherAgentRoutes);
+  app.use('/api/admin', requireAuth, adminRoutes);
 
   app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 

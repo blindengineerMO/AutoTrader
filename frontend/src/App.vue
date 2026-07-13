@@ -31,6 +31,7 @@
             <div class="side-nav-operator" v-if="!navCollapsed">
               <div class="text-[10px] uppercase text-white/35">operator</div>
               <div class="text-xs text-white/65 truncate">{{ auth.user?.email }}</div>
+              <div v-if="auth.isAdmin" class="text-[10px] uppercase text-accent mt-1">admin</div>
             </div>
           </div>
         </aside>
@@ -53,6 +54,7 @@
                 <div v-if="profileOpen" class="profile-dropdown glass-panel p-4" @click.self="profileOpen = false">
                   <div class="text-[10px] uppercase text-white/35">operator</div>
                   <div class="text-xs text-white/75 truncate mb-3">{{ auth.user?.email }}</div>
+                  <div v-if="auth.isAdmin" class="text-[10px] uppercase text-accent mb-3">admin workspace enabled</div>
                   <GlassButton variant="ghost" class="!w-full !py-2 !text-xs" @click="logout">Log out</GlassButton>
                 </div>
               </div>
@@ -73,7 +75,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuthStore } from './stores/auth';
 import GlassButton from './components/GlassButton.vue';
@@ -84,7 +86,11 @@ const auth = useAuthStore();
 const router = useRouter();
 const route = useRoute();
 
-const navItems = [
+onMounted(() => {
+  if (auth.isAuthenticated) auth.fetchMe().catch(() => {});
+});
+
+const navItems = computed(() => [
   { to: '/', label: 'Dashboard', icon: 'mdi-view-dashboard' },
   { to: '/research', label: 'Research', icon: 'mdi-radar' },
   { to: '/agents', label: 'Agents', icon: 'mdi-account-group' },
@@ -92,8 +98,9 @@ const navItems = [
   { to: '/workspace', label: 'Workspace', icon: 'mdi-briefcase-search' },
   { to: '/reports', label: 'Reports', icon: 'mdi-file-chart' },
   { to: '/orders', label: 'Trade Log', icon: 'mdi-swap-horizontal' },
+  ...(auth.isAdmin ? [{ to: '/users', label: 'Users', icon: 'mdi-account-key' }] : []),
   { to: '/settings', label: 'Settings', icon: 'mdi-cog' },
-];
+]);
 
 const navCollapsed = ref(localStorage.getItem('autotrader.navCollapsed') === '1');
 const mobileNavOpen = ref(false);
@@ -108,7 +115,7 @@ function closeMobileNav() {
   mobileNavOpen.value = false;
 }
 
-const currentPageLabel = computed(() => navItems.find((item) => item.to === route.path)?.label || 'Autotrader');
+const currentPageLabel = computed(() => navItems.value.find((item) => item.to === route.path)?.label || 'Autotrader');
 
 const initials = computed(() => {
   const email = auth.user?.email || '';

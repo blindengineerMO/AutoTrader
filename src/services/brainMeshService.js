@@ -5,6 +5,7 @@ const researchSourceRepo = require('../db/repositories/researchSourceRepo');
 const companyDiscovery = require('./companyDiscoveryService');
 const chatResearch = require('./chatResearchService');
 const investorPlaybook = require('./investorPlaybookService');
+const ollamaBrain = require('./ollamaBrainMeshService');
 const logger = require('../utils/logger');
 
 const PROTOCOL = 'BMCL/1.0';
@@ -306,6 +307,17 @@ function registerDefaultAgents() {
       metadata: { service: 'chatResearchService' },
     },
     {
+      id: ollamaBrain.OLLAMA_BRAIN_ID,
+      role: 'local-llm-brain',
+      capabilities: ['mesh.status', 'llm.assist', 'llm.reason', 'llm.research.assist', 'llm.training.suggest', 'llm.analysis.assist'],
+      metadata: {
+        service: 'ollamaBrainMeshService',
+        provider: 'ollama',
+        localOnly: true,
+        toolCalling: true,
+      },
+    },
+    {
       id: 'brain.intelligence.company',
       role: 'company-intelligence-brain',
       capabilities: ['mesh.status'],
@@ -384,6 +396,12 @@ function registerDefaultAgents() {
     candidateHints: chatResearch.normalizeCandidateHints(envelope.body?.candidateHints || []),
     sourceHints: chatResearch.normalizeSourceHints(envelope.body?.sourceHints || []),
   }));
+
+  registerHandler(ollamaBrain.OLLAMA_BRAIN_ID, 'llm.assist', ollamaBrain.handleMeshAssist);
+  registerHandler(ollamaBrain.OLLAMA_BRAIN_ID, 'llm.reason', ollamaBrain.handleMeshReason);
+  registerHandler(ollamaBrain.OLLAMA_BRAIN_ID, 'llm.research.assist', ollamaBrain.handleMeshResearch);
+  registerHandler(ollamaBrain.OLLAMA_BRAIN_ID, 'llm.training.suggest', ollamaBrain.handleMeshTraining);
+  registerHandler(ollamaBrain.OLLAMA_BRAIN_ID, 'llm.analysis.assist', ollamaBrain.handleMeshAnalysis);
 
   registerHandler('brain.playbook.investor', 'playbook.summary', () => investorPlaybook.getPlaybookSummary());
 

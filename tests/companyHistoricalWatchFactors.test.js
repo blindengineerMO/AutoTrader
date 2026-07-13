@@ -105,9 +105,71 @@ describe('company historical watch factors', () => {
       onEvent: () => {},
     });
 
-    expect(signal.brainModelKey).toBe('candidate-factor-scorer-v6-history-watch-factors');
+    expect(signal.brainModelKey).toBe('candidate-factor-scorer-v9-census-bds');
     expect(signal.evidence.featureInput.historicalWatchFactors).toBeGreaterThan(0.6);
+    expect(signal.evidence.featureInput.secFilingHistory).toBe(0.44);
+    expect(signal.evidence.featureInput.businessFormation).toBe(0.5);
+    expect(signal.evidence.featureInput.businessDynamics).toBe(0.5);
+    expect(signal.evidence.businessFormation.score).toBe(50);
+    expect(signal.evidence.businessDynamics.score).toBe(50);
     expect(signal.evidence.historicalWatchFactors).toHaveLength(3);
     expect(signal.evidence.explanation.join(' ')).toContain('Stock splits past 5 years');
+  });
+
+  it('adds SEC filing history as a company factor and candidate explanation', () => {
+    const userId = newUser();
+    const secSubmissions = {
+      symbol: 'SECF',
+      cik: '0000123456',
+      entityType: 'operating',
+      sic: '7372',
+      sicDescription: 'Services-Prepackaged Software',
+      exchanges: ['Nasdaq'],
+      latestFiling: { form: '10-Q', filingDate: new Date().toISOString().slice(0, 10) },
+      latestPeriodic: { form: '10-Q', filingDate: new Date().toISOString().slice(0, 10) },
+      latestAnnual: { form: '10-K', filingDate: '2025-02-01' },
+      latestQuarterly: { form: '10-Q', filingDate: new Date().toISOString().slice(0, 10) },
+      latestMaterialEvent: { form: '8-K', filingDate: '2025-06-01' },
+      formCounts: { '10-Q': 1, '10-K': 1, '8-K': 1 },
+      recentFilings: [{ form: '10-Q' }, { form: '10-K' }, { form: '8-K' }],
+      source: { name: 'SEC company submissions API', url: 'https://data.sec.gov/submissions/CIK0000123456.json' },
+    };
+    const summary = companyIntelligence.buildCompanySummary({
+      symbol: 'SECF',
+      companyName: 'SEC Filing Corp',
+      quote: quote('SECF'),
+      history: {
+        firstClose: 50,
+        lastClose: 80,
+        fiveYearReturnPct: 60,
+        annualizedReturnPct: 9.86,
+        maxDrawdownPct: -20,
+      },
+      macro: { riskBias: 'neutral' },
+      consumer: { consumerBias: 'neutral' },
+      population: { usPopulationGrowthPct: 0.4 },
+      oil: { changePct: 0 },
+      secSubmissions,
+    });
+
+    expect(summary.factors.secFilingHistory.score).toBeGreaterThan(60);
+    expect(summary.secSubmissions.source.url).toContain('CIK0000123456');
+
+    const [signal] = scoreCandidates({
+      userId,
+      candidates: [{ symbol: 'SECF', companyName: 'SEC Filing Corp', theme: 'watchlist', themeHits: 1 }],
+      quotes: [quote('SECF')],
+      news: { items: [] },
+      macro: { riskBias: 'neutral' },
+      consumer: { consumerBias: 'neutral' },
+      learned: { observations: [] },
+      companyIntel: { records: [{ symbol: 'SECF', summary }] },
+      jsonDatasets: [],
+      onEvent: () => {},
+    });
+
+    expect(signal.evidence.featureInput.secFilingHistory).toBeGreaterThan(0.6);
+    expect(signal.evidence.secFilingHistory.latestForm).toBe('10-Q');
+    expect(signal.evidence.explanation.join(' ')).toContain('SEC filing history');
   });
 });

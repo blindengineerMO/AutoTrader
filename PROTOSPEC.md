@@ -29,6 +29,7 @@ Current built-in agents:
 - `brain.research.source`: source learning, crawl source memory, failed URL policy.
 - `brain.discovery.company`: dynamic company/product/ticker discovery.
 - `brain.research.chat`: xAI/Grok, Gemini, Duck.ai endpoint/webapp research, and chat-research normalization.
+- `brain.llm.ollama`: local Ollama LLM assistance for reasoning, research interpretation, analysis, and training suggestions across BrainMesh.
 - `brain.intelligence.company`: company workspace and broker-factor intelligence.
 - `brain.model.neural`: Brain.js scoring and model memory.
 - `brain.playbook.investor`: high-earning investor indicator playbook.
@@ -133,6 +134,11 @@ Operations use dot-separated verbs:
 - `mesh.status`
 - `candidate.extract`
 - `chat.hints.normalize`
+- `llm.assist`
+- `llm.reason`
+- `llm.research.assist`
+- `llm.training.suggest`
+- `llm.analysis.assist`
 - `source.memory.summary`
 - `source.hint.persist`
 - `playbook.summary`
@@ -294,6 +300,77 @@ Returns dynamic company candidates from crawled/news text.
 Recipient: `brain.research.chat`
 
 Normalizes untrusted chat JSON into clean `candidateHints` and `sourceHints`.
+
+### Local Ollama LLM Operations
+
+Recipient: `brain.llm.ollama`
+
+The local Ollama brain is a shared BMCL participant for agents that need local LLM reasoning without coupling directly to Ollama APIs. The implementation uses the official `ollama` npm package against `OLLAMA_BASE_URL` (default `http://localhost:11434`), `OLLAMA_MODEL`, `OLLAMA_TIMEOUT_MS` (default `300000`), `OLLAMA_MAX_PROMPT_TOKENS` (default `4096`), `OLLAMA_NUM_PREDICT` (default `1400`), and `OLLAMA_THINK` (default `false`), redacts sensitive keys from request bodies, clips oversized strings, and returns compact AI-to-AI JSON. It may use bounded app-owned research tools only for research-oriented requests.
+
+Chat research also prefers Ollama locally by default (`CHAT_RESEARCH_PREFER_OLLAMA=true`). After a successful local Ollama research/comprehension response, external chat providers are skipped. If local Ollama fails, external providers are still skipped unless `CHAT_RESEARCH_EXTERNAL_FALLBACK_ENABLED=true`. Duck.ai browser automation is opt-in with `DUCK_AI_RESEARCH_ENABLED=true` or a sanctioned endpoint.
+
+The final strategy engine also uses this context policy for local Ollama. It sends a compact decision frame containing ranked signal metrics, top candidate rationale, macro/consumer summaries, chat-research hints, and compact source metadata. It does not send the full research snapshot, crawler archive, terminal stream, or full page excerpts to the structured-completion strategy call.
+
+Personality trading agents (`agent.personality.*`) persist a `localAiCollaboration` persona block and a `model.bmcl` block that name `brain.llm.ollama` as their local LLM collaborator. This metadata is also advertised in the BrainMesh agent registry with the `bmcl.ask.ollama` capability so seeded agents such as Bill Gates, imported agents, and newly researched custom agents can discover that they may use BMCL `ask` frames for reasoning, research interpretation, analysis, and self-improvement.
+
+Personality agent BMCL identities are shared globally by slug, not duplicated per user. For example, two users who both enable the Bill Gates worker use the same BrainMesh participant ID, `agent.personality.bill-gates`. User-specific state remains in `trading_agents`, agent workspaces, council runs, recommendations, reports, and account/ledger tables keyed by `user_id`; BMCL frames must carry the caller's `ctx.userId` so the shared brain can reason against the correct user's portfolio and settings.
+
+Typical personality-agent self-improvement frame:
+
+```json
+{
+  "from": "agent.personality.bill-gates",
+  "to": ["brain.llm.ollama"],
+  "kind": "ask",
+  "op": "llm.training.suggest",
+  "body": {
+    "question": "What should this agent adjust after the council outcome?",
+    "evidence": [{ "symbol": "MSFT", "action": "buy", "outcome": "underperformed" }],
+    "desiredOutput": "training notes and small bias-tuning suggestions"
+  }
+}
+```
+
+Supported ops:
+
+- `llm.assist`: general structured assistance for any brain/agent.
+- `llm.reason`: evidence-based causal reasoning over supplied context.
+- `llm.research.assist`: research interpretation, gap detection, and optional controlled search/page-reading tool calls.
+- `llm.training.suggest`: model-training, labeling, feature, and evaluation-loop suggestions; tools are disabled.
+- `llm.analysis.assist`: broader analysis support; tools are only used when `body.allowTools === true`.
+
+Request body:
+
+```json
+{
+  "question": "What did this watcher miss?",
+  "evidence": [{ "symbol": "XYZ", "rationale": "..." }],
+  "allowTools": false,
+  "desiredOutput": "training labels and next checks"
+}
+```
+
+Response body:
+
+```json
+{
+  "provider": "ollama",
+  "brainId": "brain.llm.ollama",
+  "model": "llama3.1",
+  "mode": "training",
+  "summary": "short answer",
+  "reasoning": "brief auditable causal chain",
+  "insights": ["specific finding"],
+  "recommendations": ["specific next action"],
+  "followUpQuestions": ["question another brain should answer"],
+  "trainingNotes": ["feature/label/model-memory suggestion"],
+  "sourceHints": [],
+  "candidateHints": [],
+  "riskNotes": ["specific caveat"]
+}
+```
+
+Tool-capable research requests can trigger `search_live_research` and `read_research_url`. These tools are implemented by the application, use short timeouts, and reject local/private URLs. Before a local chat request is sent, AutoTrader estimates prompt tokens and splits oversized crawled/news/article payloads into sub-`OLLAMA_MAX_PROMPT_TOKENS` questions, then merges chunk-level `candidateHints`, `sourceHints`, and `riskNotes`. If the selected local model reports no tool-calling capability, BMCL keeps the request local and asks Ollama to synthesize from those crawler excerpt chunks without tools.
 
 ### `source.memory.summary`
 

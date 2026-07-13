@@ -49,8 +49,8 @@ function reportWatcherSignal(userId, symbol, predictedAction, localAiScore) {
 }
 
 describe('autonomousResearchService.NEWS_FEEDS', () => {
-  it('includes the original 4 feeds plus the 13 newly added feeds', () => {
-    expect(NEWS_FEEDS).toHaveLength(17);
+  it('includes market, discovery, regulatory, filing, and contract feeds', () => {
+    expect(NEWS_FEEDS).toHaveLength(36);
   });
 
   it('has a well-formed name, region, and https url for every feed', () => {
@@ -68,7 +68,7 @@ describe('autonomousResearchService.NEWS_FEEDS', () => {
     expect(new Set(urls).size).toBe(urls.length);
   });
 
-  it('includes each of the 13 newly requested feed URLs', () => {
+  it('includes each curated market feed URL', () => {
     const expectedUrls = [
       'https://feeds.content.dowjones.io/public/rss/mw_marketpulse',
       'https://feeds.content.dowjones.io/public/rss/mw_topstories',
@@ -83,6 +83,34 @@ describe('autonomousResearchService.NEWS_FEEDS', () => {
       'https://feeds.content.dowjones.io/public/rss/WSJcomUSBusiness',
       'https://www.federalreserve.gov/feeds/press_all.xml',
       'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10001147',
+    ];
+    const urls = NEWS_FEEDS.map((feed) => feed.url);
+    for (const expected of expectedUrls) {
+      expect(urls).toContain(expected);
+    }
+  });
+
+  it('includes Google News discovery and government regulatory feed URLs', () => {
+    const expectedUrls = [
+      'https://news.google.com/rss/search?q=business&hl=en-US&gl=US&ceid=US:en',
+      'https://news.google.com/rss/search?q=%22new+company%22+OR+startup+OR+%22business+launch%22&hl=en-US&gl=US&ceid=US:en',
+      'https://news.google.com/rss/search?q=startup+%22funding+round%22+when%3A7d&hl=en-US&gl=US&ceid=US:en',
+      'https://news.google.com/rss/search?q=IPO+OR+%22filed+to+go+public%22+when%3A7d&hl=en-US&gl=US&ceid=US:en',
+      'https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=en-US&gl=US&ceid=US:en',
+      'https://www.sec.gov/news/pressreleases.rss',
+      'https://www.sec.gov/news/speeches-statements.rss',
+      'https://www.sec.gov/enforcement-litigation/litigation-releases/rss',
+      'https://www.sec.gov/enforcement-litigation/administrative-proceedings/rss',
+      'https://www.sec.gov/enforcement-litigation/trading-suspensions/rss',
+      'https://www.sec.gov/Archives/edgar/usgaap.rss.xml',
+      'https://www.sec.gov/Archives/edgar/xbrl-rr.rss.xml',
+      'https://www.sec.gov/Archives/edgar/xbrl-inline.rss.xml',
+      'https://www.sec.gov/Archives/edgar/xbrlrss.all.xml',
+      'https://www.ftc.gov/feeds/press-release.xml',
+      'https://www.justice.gov/feeds/justice-news.xml',
+      'https://www.consumerfinance.gov/about-us/blog/feed/',
+      'https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/press-releases/rss.xml',
+      'https://www.defense.gov/DesktopModules/ArticleCS/RSS.ashx?ContentType=1&Site=945&Category=549&max=20',
     ];
     const urls = NEWS_FEEDS.map((feed) => feed.url);
     for (const expected of expectedUrls) {

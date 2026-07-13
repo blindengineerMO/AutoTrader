@@ -11,6 +11,26 @@ function num(value, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function ollamaThink(value, fallback = false) {
+  if (value === undefined || value === '') return fallback;
+  const normalized = String(value).toLowerCase();
+  if (['high', 'medium', 'low'].includes(normalized)) return normalized;
+  return normalized === 'true';
+}
+
+function list(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+const defaultAdminEmails = [
+  ...list(process.env.DEFAULT_ADMIN_EMAILS || process.env.ADMIN_EMAILS),
+  ...list(process.env.DEFAULT_ADMIN_EMAIL || process.env.ADMIN_EMAIL),
+];
+if (defaultAdminEmails.length === 0) defaultAdminEmails.push('admin@autotrader.local');
+
 const config = {
   env: process.env.NODE_ENV || 'development',
   port: num(process.env.PORT, 3000),
@@ -18,6 +38,13 @@ const config = {
 
   jwtSecret: process.env.JWT_SECRET || '',
   credentialEncryptionKey: process.env.CREDENTIAL_ENCRYPTION_KEY || '',
+
+  defaultAdmin: {
+    email: defaultAdminEmails[0],
+    emails: [...new Set(defaultAdminEmails)],
+    password: process.env.DEFAULT_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD || 'ChangeMeAdmin123!',
+    resetPassword: bool(process.env.DEFAULT_ADMIN_RESET_PASSWORD || process.env.ADMIN_RESET_PASSWORD, false),
+  },
 
   openaiApiKey: process.env.OPENAI_API_KEY || '',
   openaiModel: process.env.OPENAI_MODEL || 'gpt-4o-mini',
@@ -34,10 +61,20 @@ const config = {
   geminiApiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '',
   geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
 
-  ollamaBaseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434/v1',
+  ollamaBaseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
   ollamaModel: process.env.OLLAMA_MODEL || 'llama3.1',
+  ollamaTimeoutMs: num(process.env.OLLAMA_TIMEOUT_MS, 300000),
+  ollamaMaxPromptTokens: num(process.env.OLLAMA_MAX_PROMPT_TOKENS, 4096),
+  ollamaNumPredict: num(process.env.OLLAMA_NUM_PREDICT, 1400),
+  ollamaThink: ollamaThink(process.env.OLLAMA_THINK, false),
+  ollamaToolCallingEnabled: bool(process.env.OLLAMA_TOOL_CALLING_ENABLED, true),
+  ollamaToolMaxRounds: num(process.env.OLLAMA_TOOL_MAX_ROUNDS, 3),
+  ollamaToolTimeoutMs: num(process.env.OLLAMA_TOOL_TIMEOUT_MS, 12000),
+  chatResearchPreferOllama: bool(process.env.CHAT_RESEARCH_PREFER_OLLAMA, true),
+  chatResearchExternalFallbackEnabled: bool(process.env.CHAT_RESEARCH_EXTERNAL_FALLBACK_ENABLED, false),
 
   duckAiResearch: {
+    enabled: bool(process.env.DUCK_AI_RESEARCH_ENABLED, false),
     publicUrl: process.env.DUCK_AI_PUBLIC_URL || 'https://duck.ai/',
     sanctionedEndpoint: process.env.DUCK_AI_SANCTIONED_ENDPOINT || '',
     model: process.env.DUCK_AI_MODEL || '',
@@ -52,6 +89,11 @@ const config = {
   openFdaApiKey: process.env.OPENFDA_API_KEY || '',
   reliefWebAppName: process.env.RELIEFWEB_APP_NAME || '',
   nwsUserAgent: process.env.NWS_USER_AGENT || process.env.NOAA_USER_AGENT || '',
+  censusApiKey: process.env.CENSUS_API_KEY || '',
+  gdelt: {
+    enabled: bool(process.env.GDELT_DOC_ENABLED, true),
+    maxRecords: num(process.env.GDELT_DOC_MAX_RECORDS, 100),
+  },
 
   secEdgarUserAgent: process.env.SEC_EDGAR_USER_AGENT || '',
 
@@ -62,10 +104,14 @@ const config = {
     smtpUrl: process.env.ALERT_SMTP_URL || '',
   },
 
-  robinhood: {
-    username: process.env.ROBINHOOD_USERNAME || '',
-    password: process.env.ROBINHOOD_PASSWORD || '',
-    mfaSecret: process.env.ROBINHOOD_MFA_SECRET || '',
+  alpaca: {
+    keyId: process.env.ALPACA_KEY_ID || process.env.APCA_API_KEY_ID || '',
+    secretKey: process.env.ALPACA_SECRET_KEY || process.env.APCA_API_SECRET_KEY || '',
+    paper: bool(process.env.ALPACA_PAPER, true),
+    baseUrl:
+      process.env.ALPACA_BASE_URL ||
+      process.env.APCA_API_BASE_URL ||
+      (bool(process.env.ALPACA_PAPER, true) ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets'),
   },
 
   trading: {
@@ -75,6 +121,9 @@ const config = {
   },
 
   dbPath: process.env.DB_PATH || require('path').join(__dirname, '..', '..', 'data', 'autotrader.db'),
+
+  articleLlmComprehensionEnabled: bool(process.env.ARTICLE_LLM_COMPREHENSION_ENABLED, true),
+  articleLlmComprehensionMaxPerRun: num(process.env.ARTICLE_LLM_COMPREHENSION_MAX_PER_RUN, 4),
 };
 
 /**
@@ -87,8 +136,8 @@ function getTradingReadiness() {
   if (!config.openaiApiKey && !config.deepseekApiKey && !config.groqApiKey) {
     missing.push('OPENAI_API_KEY or DEEPSEEK_API_KEY or GROQ_API_KEY');
   }
-  if (!config.robinhood.username) missing.push('ROBINHOOD_USERNAME');
-  if (!config.robinhood.password) missing.push('ROBINHOOD_PASSWORD');
+  if (!config.alpaca.keyId) missing.push('ALPACA_KEY_ID or APCA_API_KEY_ID');
+  if (!config.alpaca.secretKey) missing.push('ALPACA_SECRET_KEY or APCA_API_SECRET_KEY');
   return { ready: missing.length === 0, missing };
 }
 

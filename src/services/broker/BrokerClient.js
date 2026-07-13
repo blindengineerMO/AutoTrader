@@ -1,7 +1,7 @@
 /**
  * Interface every broker implementation must satisfy. Keeping this thin and
  * explicit means the rules engine and order execution layer never depend on
- * Robinhood-specific behavior directly.
+ * provider-specific behavior directly.
  */
 class BrokerClient {
   async connect() {

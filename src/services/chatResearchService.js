@@ -3,6 +3,11 @@ const { config } = require('../config');
 const providerCredentialRepo = require('../db/repositories/providerCredentialRepo');
 const researchSourceRepo = require('../db/repositories/researchSourceRepo');
 const duckAiWebClient = require('./duckAiWebClient');
+const ollamaClient = require('./ollamaClient');
+const ollamaResearchTools = require('./ollamaResearchToolService');
+
+const TOKEN_CHAR_RATIO = 4;
+const OLLAMA_PROMPT_SAFETY_TOKENS = 300;
 
 const SYSTEM_PROMPT = `You are an autonomous investment research assistant inside AutoTrader.
 Use only the evidence supplied in the prompt. Do not invent URLs, prices, or facts.
@@ -32,9 +37,28 @@ Return only JSON matching this shape:
   "riskNotes": ["specific caveat"]
 }`;
 
-async function runChatResearch({ userId, news, learned, macro, consumer, jsonDatasets, discoveredCompanies = [], onEvent = () => {} } = {}) {
-  const providers = buildProviders(userId);
-  const payload = buildResearchPayload({ news, learned, macro, consumer, jsonDatasets, discoveredCompanies });
+const ARTICLE_COMPREHENSION_SYSTEM_PROMPT = `You are an autonomous investment research assistant inside AutoTrader.
+You will be shown one crawled news article plus a short list of already-classified event categories
+(e.g. "war or geopolitical conflict", "sanctions or trade policy") and a small set of example Google-search
+query templates drawn from AutoTrader's research playbook for related research dimensions.
+
+Your job is to read the article and reason about its indirect, second-order investment implications —
+not just companies named in the article. For example, an article about a war should lead you to identify
+categories of companies that would see increased demand (e.g. military equipment manufacturers), not just
+companies already mentioned by name. Use only evidence in the article; do not invent facts, prices, or URLs.
+
+Return only JSON matching this shape:
+{
+  "reasoning": "short causal chain from the article's subject to an investment implication",
+  "inferredCompanies": [
+    { "name": "company or sector-proxy name", "symbol": "TICKER or empty string", "reason": "why this follows from the article" }
+  ],
+  "followUpQueries": ["concrete google search query to research one of the inferred companies or the underlying theme"]
+}`;
+
+async function runChatResearch({ userId, news, learned, macro, consumer, jsonDatasets, businessFormation, businessDynamics, discoveredCompanies = [], onEvent = () => {} } = {}) {
+  const providers = buildProviders(userId, SYSTEM_PROMPT);
+  const payload = buildResearchPayload({ news, learned, macro, consumer, jsonDatasets, businessFormation, businessDynamics, discoveredCompanies });
   const results = [];
 
   if (!providers.length) {
@@ -53,11 +77,25 @@ async function runChatResearch({ userId, news, learned, macro, consumer, jsonDat
     }
 
     try {
+      if (provider.provider === 'ollama' && results.some((result) => result.available === false)) {
+        emit(onEvent, 'chat-research', 37, 'info', 'External chat research was unavailable; falling back to local Ollama research agent.', {
+          provider: provider.provider,
+          model: provider.model,
+          failedProviders: results.filter((result) => result.available === false).map((result) => result.provider),
+        });
+      } else if (provider.provider === 'ollama') {
+        emit(onEvent, 'chat-research', 36, 'info', 'Using local Ollama research agent before external chat providers.', {
+          provider: provider.provider,
+          model: provider.model,
+          baseUrl: provider.baseUrl,
+          toolCalling: config.ollamaToolCallingEnabled,
+        });
+      }
       emit(onEvent, 'chat-research', 36, 'debug', 'Requesting autonomous research augmentation from chat provider.', {
         provider: provider.provider,
         model: provider.model,
       });
-      const result = await provider.ask(payload);
+      const result = await provider.ask(payload, { onEvent });
       const normalized = normalizeProviderResult(provider, result);
       persistSourceHints(userId, normalized.sourceHints, provider.provider);
       emit(onEvent, 'chat-research', 37, 'debug', 'Chat provider returned research leads.', {
@@ -66,8 +104,20 @@ async function runChatResearch({ userId, news, learned, macro, consumer, jsonDat
         sourceHints: normalized.sourceHints.length,
       });
       results.push(normalized);
+      if (provider.provider === 'ollama' && config.chatResearchPreferOllama) {
+        emit(onEvent, 'chat-research', 38, 'debug', 'Local Ollama research completed; skipping external chat providers.', {
+          provider: provider.provider,
+          model: provider.model,
+        });
+        break;
+      }
     } catch (err) {
-      emit(onEvent, 'chat-research', 37, 'warn', 'Chat research provider failed; continuing with crawl-first research.', {
+      const stopAfterLocalFailure = provider.provider === 'ollama'
+        && config.chatResearchPreferOllama
+        && !config.chatResearchExternalFallbackEnabled;
+      emit(onEvent, 'chat-research', 37, 'warn', stopAfterLocalFailure
+        ? 'Local Ollama research failed; external chat fallback is disabled by local-first policy.'
+        : 'Chat research provider failed; continuing with crawl-first research.', {
         provider: provider.provider,
         error: err.message,
       });
@@ -82,14 +132,84 @@ async function runChatResearch({ userId, news, learned, macro, consumer, jsonDat
         sourceHints: [],
         riskNotes: [],
       });
+      if (stopAfterLocalFailure) break;
     }
   }
 
   return combineResults(results);
 }
 
-function buildProviders(userId) {
+async function runArticleComprehension({ userId, article, eventCategories = [], queryTemplates = [], onEvent = () => {} } = {}) {
+  const providers = buildProviders(userId, ARTICLE_COMPREHENSION_SYSTEM_PROMPT);
+  if (!providers.length) {
+    emit(onEvent, 'article-comprehension', 13, 'debug', 'No supported chat-research providers configured; skipping article comprehension.', {
+      url: article?.url,
+    });
+    return emptyArticleComprehensionResult();
+  }
+
+  const payload = {
+    task: 'Read this article and infer indirect investment implications beyond companies named directly in the text.',
+    article: {
+      title: cleanText(article?.title).slice(0, 300),
+      url: article?.url,
+      excerpt: cleanText(article?.excerpt || article?.text).slice(0, 2000),
+    },
+    eventCategories,
+    exampleQueryTemplates: queryTemplates.slice(0, 12),
+  };
+
+  for (const provider of providers) {
+    if (provider.kind === 'unsupported-web-chat') continue;
+    try {
+      const result = await provider.ask(payload, { onEvent });
+      const normalized = normalizeArticleComprehensionResult(provider, result);
+      emit(onEvent, 'article-comprehension', 13, 'debug', 'Chat provider inferred article implications.', {
+        provider: provider.provider,
+        url: article?.url,
+        inferredCompanies: normalized.inferredCompanies.length,
+        followUpQueries: normalized.followUpQueries.length,
+      });
+      return normalized;
+    } catch (err) {
+      emit(onEvent, 'article-comprehension', 13, 'warn', 'Article comprehension provider failed; trying next provider.', {
+        provider: provider.provider,
+        url: article?.url,
+        error: err.message,
+      });
+    }
+  }
+
+  return emptyArticleComprehensionResult();
+}
+
+function normalizeArticleComprehensionResult(provider, result) {
+  return {
+    provider: provider.provider,
+    reasoning: cleanText(result?.reasoning).slice(0, 500),
+    inferredCompanies: (Array.isArray(result?.inferredCompanies) ? result.inferredCompanies : [])
+      .map((item) => ({
+        name: cleanText(item.name).slice(0, 120),
+        symbol: cleanSymbol(item.symbol),
+        reason: cleanText(item.reason).slice(0, 300),
+      }))
+      .filter((item) => item.name)
+      .slice(0, 10),
+    followUpQueries: (Array.isArray(result?.followUpQueries) ? result.followUpQueries : [])
+      .map((query) => cleanText(query).slice(0, 200))
+      .filter(Boolean)
+      .slice(0, 6),
+  };
+}
+
+function emptyArticleComprehensionResult() {
+  return { provider: null, reasoning: '', inferredCompanies: [], followUpQueries: [] };
+}
+
+function buildProviders(userId, systemPrompt = SYSTEM_PROMPT) {
   const providers = [];
+  if (config.chatResearchPreferOllama) addOllamaProvider(providers, userId, systemPrompt);
+
   const userXai = userId ? providerCredentialRepo.getSecret(userId, 'xai-grok') : null;
   const xaiApiKey = userXai?.apiKey || config.xaiApiKey;
   const xaiModel = userXai?.model || config.xaiModel;
@@ -102,7 +222,7 @@ function buildProviders(userId) {
         const completion = await client.chat.completions.create({
           model: xaiModel,
           messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'system', content: systemPrompt },
             { role: 'user', content: JSON.stringify(payload) },
           ],
           response_format: { type: 'json_object' },
@@ -120,7 +240,7 @@ function buildProviders(userId) {
     providers.push({
       provider: 'gemini',
       model: geminiModel,
-      ask: (payload) => askGemini({ apiKey: geminiApiKey, model: geminiModel, payload }),
+      ask: (payload) => askGemini({ apiKey: geminiApiKey, model: geminiModel, payload, systemPrompt }),
     });
   }
 
@@ -130,15 +250,15 @@ function buildProviders(userId) {
     providers.push({
       provider: 'duck-ai',
       model: userDuck?.model || config.duckAiResearch.model || 'duck-ai-sanctioned-endpoint',
-      ask: (payload) => askSanctionedDuckEndpoint({ endpoint: duckEndpoint, payload }),
+      ask: (payload) => askSanctionedDuckEndpoint({ endpoint: duckEndpoint, payload, systemPrompt }),
     });
-  } else if (config.duckAiResearch.browserEnabled) {
+  } else if (config.duckAiResearch.enabled && config.duckAiResearch.browserEnabled) {
     providers.push({
       provider: 'duck-ai',
       model: userDuck?.model || config.duckAiResearch.model || 'public-webapp-session',
-      ask: (payload) => duckAiWebClient.askDuckAiWeb({ payload, systemPrompt: SYSTEM_PROMPT }),
+      ask: (payload) => duckAiWebClient.askDuckAiWeb({ payload, systemPrompt }),
     });
-  } else {
+  } else if (config.duckAiResearch.enabled) {
     providers.push({
       provider: 'duck-ai',
       model: 'public-web-chat',
@@ -147,10 +267,272 @@ function buildProviders(userId) {
     });
   }
 
+  if (!config.chatResearchPreferOllama) addOllamaProvider(providers, userId, systemPrompt);
+
   return providers;
 }
 
-async function askGemini({ apiKey, model, payload }) {
+function addOllamaProvider(providers, userId, systemPrompt) {
+  const userOllama = userId ? providerCredentialRepo.getSecret(userId, 'ollama') : null;
+  const ollamaBaseUrl = userOllama?.baseUrl || config.ollamaBaseUrl;
+  const ollamaModel = userOllama?.model || config.ollamaModel;
+  if (ollamaBaseUrl && ollamaModel) {
+    providers.push({
+      provider: 'ollama',
+      model: ollamaModel,
+      baseUrl: ollamaBaseUrl,
+      role: 'local-interpretation',
+      ask: (payload, { onEvent = () => {} } = {}) => askOllamaResearchAgent({
+        baseUrl: ollamaBaseUrl,
+        model: ollamaModel,
+        payload,
+        systemPrompt,
+        onEvent,
+      }),
+    });
+  }
+}
+
+async function askOllamaResearchAgent({ baseUrl, model, payload, systemPrompt, onEvent = () => {} }) {
+  const localSystemPrompt = buildLocalOllamaSystemPrompt(systemPrompt);
+  const payloadChunks = buildOllamaPayloadChunks(payload, localSystemPrompt);
+  if (payloadChunks.length > 1) {
+    emit(onEvent, 'ollama-chunking', 36, 'debug', 'Split local Ollama research into smaller questions for context safety.', {
+      chunks: payloadChunks.length,
+      maxPromptTokens: config.ollamaMaxPromptTokens,
+    });
+  }
+
+  const results = [];
+  for (let index = 0; index < payloadChunks.length; index += 1) {
+    const chunk = payloadChunks[index];
+    const chunkedPayload = payloadChunks.length > 1
+      ? {
+          ...chunk,
+          chunking: {
+            chunkIndex: index + 1,
+            totalChunks: payloadChunks.length,
+            instruction: 'Analyze only this chunk of crawler/research evidence. Return JSON hints from this chunk; the app will merge all chunk results.',
+          },
+        }
+      : chunk;
+
+    if (payloadChunks.length > 1) {
+      emit(onEvent, 'ollama-chunking', 36, 'debug', 'Sending local Ollama research chunk.', {
+        chunk: index + 1,
+        totalChunks: payloadChunks.length,
+        estimatedPromptTokens: estimatePromptTokens(localSystemPrompt, chunkedPayload),
+      });
+    }
+
+    const result = config.ollamaToolCallingEnabled
+      ? await askOllamaResearchChunkWithTools({ baseUrl, model, payload: chunkedPayload, systemPrompt: localSystemPrompt, onEvent })
+      : await ollamaClient.askOllamaJson({ baseUrl, model, payload: chunkedPayload, systemPrompt: localSystemPrompt });
+    results.push(result);
+  }
+
+  return mergeOllamaChunkResults(results);
+}
+
+async function askOllamaResearchChunkWithTools({ baseUrl, model, payload, systemPrompt, onEvent = () => {} }) {
+  return ollamaClient.askOllamaJsonWithTools({
+    baseUrl,
+    model,
+    payload,
+    systemPrompt,
+    tools: ollamaResearchTools.getToolDefinitions(),
+    executeToolCall: (call) => ollamaResearchTools.executeToolCall(call, { onEvent }),
+    onToolCall: (call, round) => emit(onEvent, 'ollama-tool', 38, 'debug', 'Local Ollama agent selected a research tool.', {
+      tool: call?.function?.name || call?.name,
+      round,
+    }),
+  });
+}
+
+function buildLocalOllamaSystemPrompt(systemPrompt) {
+  return `${systemPrompt}
+
+You are running as a local Ollama research agent. You do not have built-in current market knowledge.
+Use tools when you need live search results or deeper page text to interpret crawled evidence. Tool
+results are observations, not truth; cite them through sourceHints/sourceUrls and include caveats in riskNotes.`;
+}
+
+function buildOllamaPayloadChunks(payload, systemPrompt) {
+  const maxTokens = Math.max(512, Number(config.ollamaMaxPromptTokens) || 4096);
+  const maxPayloadTokens = Math.max(256, maxTokens - estimateTokens(systemPrompt) - OLLAMA_PROMPT_SAFETY_TOKENS);
+  if (estimateTokens(JSON.stringify(payload || {})) <= maxPayloadTokens) return [payload || {}];
+
+  const base = buildOllamaChunkBase(payload);
+  const evidence = extractOllamaEvidencePieces(payload);
+  if (!evidence.length) return splitOversizedPayload(payload, maxPayloadTokens);
+
+  const maxPayloadChars = maxPayloadTokens * TOKEN_CHAR_RATIO;
+  const baseTokens = estimateTokens(JSON.stringify(base));
+  const pieceTokenBudget = Math.max(180, maxPayloadTokens - baseTokens - 120);
+  const splitEvidence = evidence.flatMap((piece) => splitEvidencePiece(piece, pieceTokenBudget));
+  const chunks = [];
+  let current = { ...base, evidence: [] };
+
+  for (const piece of splitEvidence) {
+    const candidate = { ...current, evidence: [...current.evidence, piece] };
+    if (current.evidence.length && estimateTokens(JSON.stringify(candidate)) > maxPayloadTokens) {
+      chunks.push(current);
+      current = { ...base, evidence: [piece] };
+    } else {
+      current = candidate;
+    }
+
+    if (estimateTokens(JSON.stringify(current)) > maxPayloadTokens) {
+      const oversized = current.evidence.pop();
+      if (current.evidence.length) chunks.push(current);
+      for (const smaller of splitEvidencePiece(oversized, Math.max(80, Math.floor(pieceTokenBudget / 2)))) {
+        chunks.push({ ...base, evidence: [smaller] });
+      }
+      current = { ...base, evidence: [] };
+    }
+  }
+
+  if (current.evidence.length) chunks.push(current);
+  return chunks.map((chunk) => trimChunkToBudget(chunk, maxPayloadChars));
+}
+
+function buildOllamaChunkBase(payload = {}) {
+  const base = {
+    task: payload.task || 'Analyze research evidence and return investment research hints.',
+  };
+  if (payload.macro) base.macro = trimObjectForPrompt(payload.macro, 1800);
+  if (payload.consumer) base.consumer = trimObjectForPrompt(payload.consumer, 1600);
+  if (payload.jsonDatasets) base.jsonDatasets = trimObjectForPrompt(payload.jsonDatasets, 1800);
+  if (payload.businessFormation) base.businessFormation = trimObjectForPrompt(payload.businessFormation, 1200);
+  if (payload.businessDynamics) base.businessDynamics = trimObjectForPrompt(payload.businessDynamics, 1200);
+  if (payload.eventCategories) base.eventCategories = payload.eventCategories;
+  if (payload.exampleQueryTemplates) base.exampleQueryTemplates = (payload.exampleQueryTemplates || []).slice(0, 8);
+  return base;
+}
+
+function extractOllamaEvidencePieces(payload = {}) {
+  const pieces = [];
+  for (const item of payload.news || []) {
+    pieces.push({
+      type: 'news',
+      title: cleanText(item.title).slice(0, 220),
+      url: item.url || item.link,
+      source: item.source,
+      publishedAt: item.publishedAt,
+      text: cleanText(item.description || item.summary || '').slice(0, 2200),
+    });
+  }
+  for (const item of payload.learnedObservations || []) {
+    pieces.push({
+      type: 'crawled-page',
+      title: cleanText(item.title).slice(0, 220),
+      url: item.url,
+      tags: item.tags,
+      links: (item.links || []).slice(0, 5),
+      text: cleanText(item.excerpt || item.text || item.fullText || ''),
+    });
+  }
+  for (const item of payload.discoveredCompanies || []) {
+    pieces.push({
+      type: 'discovered-company',
+      title: cleanText(item.companyName || item.symbol).slice(0, 220),
+      symbol: cleanSymbol(item.symbol),
+      tags: item.tags,
+      text: cleanText(item.reason || '').slice(0, 1200),
+    });
+  }
+  if (payload.article) {
+    pieces.push({
+      type: 'article',
+      title: cleanText(payload.article.title).slice(0, 220),
+      url: payload.article.url,
+      text: cleanText(payload.article.excerpt || payload.article.text || ''),
+    });
+  }
+  return pieces.filter((piece) => piece.title || piece.text || piece.url || piece.symbol);
+}
+
+function splitEvidencePiece(piece, tokenBudget) {
+  const maxChars = Math.max(600, tokenBudget * TOKEN_CHAR_RATIO);
+  const text = cleanText(piece?.text || '');
+  if (estimateTokens(JSON.stringify(piece)) <= tokenBudget) return [piece];
+  if (!text) return [{ ...piece, text: '' }];
+
+  const chunks = splitText(text, Math.max(300, maxChars - JSON.stringify({ ...piece, text: '' }).length));
+  return chunks.map((chunk, index) => ({
+    ...piece,
+    text: chunk,
+    part: chunks.length > 1 ? `${index + 1}/${chunks.length}` : undefined,
+  }));
+}
+
+function splitOversizedPayload(payload, maxPayloadTokens) {
+  const text = JSON.stringify(payload || {});
+  return splitText(text, Math.max(1000, maxPayloadTokens * TOKEN_CHAR_RATIO)).map((chunk, index, chunks) => ({
+    task: 'Analyze this serialized research payload chunk and return JSON research hints.',
+    serializedPayloadChunk: chunk,
+    chunking: { chunkIndex: index + 1, totalChunks: chunks.length },
+  }));
+}
+
+function trimChunkToBudget(chunk, maxPayloadChars) {
+  const copy = JSON.parse(JSON.stringify(chunk));
+  while (JSON.stringify(copy).length > maxPayloadChars && copy.evidence?.length) {
+    const largest = copy.evidence.reduce((chosen, item, index) => {
+      const length = JSON.stringify(item).length;
+      return length > chosen.length ? { index, length } : chosen;
+    }, { index: 0, length: 0 });
+    const item = copy.evidence[largest.index];
+    item.text = cleanText(item.text).slice(0, Math.max(300, Math.floor((item.text || '').length * 0.75)));
+    if (String(item.text || '').length <= 320) break;
+  }
+  return copy;
+}
+
+function trimObjectForPrompt(value, maxChars) {
+  const text = JSON.stringify(value || {});
+  if (text.length <= maxChars) return value;
+  return { truncated: true, json: text.slice(0, maxChars) };
+}
+
+function splitText(text, maxChars) {
+  const clean = cleanText(text);
+  if (clean.length <= maxChars) return [clean];
+  const chunks = [];
+  let remaining = clean;
+  while (remaining.length > maxChars) {
+    const slice = remaining.slice(0, maxChars);
+    const breakAt = Math.max(slice.lastIndexOf('. '), slice.lastIndexOf('; '), slice.lastIndexOf(', '), slice.lastIndexOf(' '));
+    const end = breakAt > maxChars * 0.45 ? breakAt + 1 : maxChars;
+    chunks.push(remaining.slice(0, end).trim());
+    remaining = remaining.slice(end).trim();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
+
+function mergeOllamaChunkResults(results) {
+  if (results.length <= 1) return results[0] || {};
+  return {
+    summary: results.map((result) => cleanText(result?.summary)).filter(Boolean).join(' '),
+    candidateHints: results.flatMap((result) => result?.candidateHints || result?.candidates || []),
+    sourceHints: results.flatMap((result) => result?.sourceHints || result?.sources || []),
+    riskNotes: results.flatMap((result) => result?.riskNotes || result?.risks || []),
+    inferredCompanies: results.flatMap((result) => result?.inferredCompanies || []),
+    followUpQueries: results.flatMap((result) => result?.followUpQueries || []),
+    reasoning: results.map((result) => cleanText(result?.reasoning)).filter(Boolean).join(' '),
+  };
+}
+
+function estimatePromptTokens(systemPrompt, payload) {
+  return estimateTokens(systemPrompt) + estimateTokens(JSON.stringify(payload || {}));
+}
+
+function estimateTokens(value) {
+  return Math.ceil(String(value || '').length / TOKEN_CHAR_RATIO);
+}
+
+async function askGemini({ apiKey, model, payload, systemPrompt = SYSTEM_PROMPT }) {
   const url = new URL(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`);
   url.searchParams.set('key', apiKey);
   const res = await fetch(url, {
@@ -164,7 +546,7 @@ async function askGemini({ apiKey, model, payload }) {
       contents: [
         {
           role: 'user',
-          parts: [{ text: `${SYSTEM_PROMPT}\n\nResearch payload:\n${JSON.stringify(payload)}` }],
+          parts: [{ text: `${systemPrompt}\n\nResearch payload:\n${JSON.stringify(payload)}` }],
         },
       ],
     }),
@@ -175,18 +557,18 @@ async function askGemini({ apiKey, model, payload }) {
   return JSON.parse(extractJsonObject(text));
 }
 
-async function askSanctionedDuckEndpoint({ endpoint, payload }) {
+async function askSanctionedDuckEndpoint({ endpoint, payload, systemPrompt = SYSTEM_PROMPT }) {
   const res = await fetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ system: SYSTEM_PROMPT, input: payload }),
+    body: JSON.stringify({ system: systemPrompt, input: payload }),
   });
   if (!res.ok) throw new Error(`Duck.ai sanctioned endpoint failed: ${res.status} ${await res.text()}`);
   const data = await res.json();
   return data.summary || data.candidateHints || data.sourceHints ? data : JSON.parse(extractJsonObject(data.content || data.text || '{}'));
 }
 
-function buildResearchPayload({ news, learned, macro, consumer, jsonDatasets, discoveredCompanies }) {
+function buildResearchPayload({ news, learned, macro, consumer, jsonDatasets, businessFormation, businessDynamics, discoveredCompanies }) {
   return {
     task: 'Find follow-up investment research leads and crawlable sources from current collected evidence.',
     news: (news?.items || []).slice(0, 10).map((item) => ({
@@ -221,6 +603,22 @@ function buildResearchPayload({ news, learned, macro, consumer, jsonDatasets, di
       compositeRiskScore: jsonDatasets?.compositeRiskScore,
       opportunityScore: jsonDatasets?.opportunityScore,
       categoryScores: jsonDatasets?.categoryScores,
+    },
+    businessFormation: {
+      available: businessFormation?.available,
+      momentum: businessFormation?.momentum,
+      opportunityScore: businessFormation?.opportunityScore,
+      riskScore: businessFormation?.riskScore,
+      averageGrowthPct: businessFormation?.averageGrowthPct,
+      latestPeriod: businessFormation?.latestPeriod,
+    },
+    businessDynamics: {
+      available: businessDynamics?.available,
+      momentum: businessDynamics?.momentum,
+      opportunityScore: businessDynamics?.opportunityScore,
+      riskScore: businessDynamics?.riskScore,
+      netDynamismPct: businessDynamics?.netDynamismPct,
+      latestYear: businessDynamics?.latestYear,
     },
   };
 }
@@ -382,6 +780,9 @@ function emit(onEvent, phase, progress, level, message, data) {
 
 module.exports = {
   runChatResearch,
+  runArticleComprehension,
+  buildProviders,
+  normalizeArticleComprehensionResult,
   buildResearchPayload,
   normalizeCandidateHints,
   normalizeSourceHints,

@@ -10,7 +10,11 @@ const investorPlaybook = require('./investorPlaybookService');
 const jsonDatasetIndicators = require('./jsonDatasetIndicatorService');
 const companyDiscovery = require('./companyDiscoveryService');
 const chatResearch = require('./chatResearchService');
+const articleComprehension = require('./articleComprehensionService');
 const financialEventWeights = require('./financialEventWeightingService');
+const censusBfs = require('./censusBfsService');
+const censusBds = require('./censusBdsService');
+const gdeltDoc = require('./gdeltDocService');
 const brainMesh = require('./brainMeshService');
 const watcherAgentService = require('./watcherAgentService');
 const crawleeCrawler = require('./crawleeResearchCrawlerService');
@@ -53,6 +57,11 @@ const NEWS_FEEDS = [
   { name: 'CNBC Economy', region: 'US economy', url: 'https://www.cnbc.com/id/20910258/device/rss/rss.html' },
   { name: 'BBC Business', region: 'world business', url: 'https://feeds.bbci.co.uk/news/business/rss.xml' },
   { name: 'Google News World Business', region: 'world news', url: 'https://news.google.com/rss/search?q=world+economy+markets&hl=en-US&gl=US&ceid=US:en' },
+  { name: 'Google News Business Search', region: 'US business discovery', url: 'https://news.google.com/rss/search?q=business&hl=en-US&gl=US&ceid=US:en' },
+  { name: 'Google News New Company Search', region: 'US startup discovery', url: 'https://news.google.com/rss/search?q=%22new+company%22+OR+startup+OR+%22business+launch%22&hl=en-US&gl=US&ceid=US:en' },
+  { name: 'Google News Startup Funding', region: 'US startup funding', url: 'https://news.google.com/rss/search?q=startup+%22funding+round%22+when%3A7d&hl=en-US&gl=US&ceid=US:en' },
+  { name: 'Google News IPO Activity', region: 'US IPO discovery', url: 'https://news.google.com/rss/search?q=IPO+OR+%22filed+to+go+public%22+when%3A7d&hl=en-US&gl=US&ceid=US:en' },
+  { name: 'Google News Business Topic', region: 'US business discovery', url: 'https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=en-US&gl=US&ceid=US:en' },
   { name: 'MarketWatch Pulse', region: 'US markets', url: 'https://feeds.content.dowjones.io/public/rss/mw_marketpulse' },
   { name: 'MarketWatch Top Stories', region: 'US markets', url: 'https://feeds.content.dowjones.io/public/rss/mw_topstories' },
   { name: 'MarketWatch Bulletins', region: 'US markets', url: 'https://feeds.content.dowjones.io/public/rss/mw_bulletins' },
@@ -66,6 +75,20 @@ const NEWS_FEEDS = [
   { name: 'WSJ US Business', region: 'US business', url: 'https://feeds.content.dowjones.io/public/rss/WSJcomUSBusiness' },
   { name: 'Federal Reserve Press Releases', region: 'US monetary policy', url: 'https://www.federalreserve.gov/feeds/press_all.xml' },
   { name: 'CNBC Markets', region: 'US markets', url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10001147' },
+  { name: 'SEC Press Releases', region: 'US regulatory filings', url: 'https://www.sec.gov/news/pressreleases.rss' },
+  { name: 'SEC Speeches and Statements', region: 'US regulatory policy', url: 'https://www.sec.gov/news/speeches-statements.rss' },
+  { name: 'SEC Litigation Releases', region: 'US enforcement', url: 'https://www.sec.gov/enforcement-litigation/litigation-releases/rss' },
+  { name: 'SEC Administrative Proceedings', region: 'US enforcement', url: 'https://www.sec.gov/enforcement-litigation/administrative-proceedings/rss' },
+  { name: 'SEC Trading Suspensions', region: 'US enforcement', url: 'https://www.sec.gov/enforcement-litigation/trading-suspensions/rss' },
+  { name: 'SEC Structured Filings', region: 'US filings', url: 'https://www.sec.gov/Archives/edgar/usgaap.rss.xml' },
+  { name: 'SEC Mutual Fund Structured Filings', region: 'US filings', url: 'https://www.sec.gov/Archives/edgar/xbrl-rr.rss.xml' },
+  { name: 'SEC Inline XBRL Filings', region: 'US filings', url: 'https://www.sec.gov/Archives/edgar/xbrl-inline.rss.xml' },
+  { name: 'SEC All XBRL Filings', region: 'US filings', url: 'https://www.sec.gov/Archives/edgar/xbrlrss.all.xml' },
+  { name: 'FTC Press Releases', region: 'US antitrust consumer protection', url: 'https://www.ftc.gov/feeds/press-release.xml' },
+  { name: 'DOJ Justice News', region: 'US antitrust fraud enforcement', url: 'https://www.justice.gov/feeds/justice-news.xml' },
+  { name: 'CFPB Newsroom', region: 'US consumer finance', url: 'https://www.consumerfinance.gov/about-us/blog/feed/' },
+  { name: 'FDA Press Releases', region: 'US healthcare regulatory', url: 'https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/press-releases/rss.xml' },
+  { name: 'Department of Defense Contracts', region: 'US defense contracts', url: 'https://www.defense.gov/DesktopModules/ArticleCS/RSS.ashx?ContentType=1&Site=945&Category=549&max=20' },
 ];
 
 const THEMES = [
@@ -100,12 +123,14 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
     watchlist,
   });
 
-  const [learned, news, macro, consumer, jsonDatasets] = await Promise.all([
+  const [learned, news, macro, consumer, jsonDatasets, businessFormation, businessDynamics] = await Promise.all([
     sourceLearning.collectLearnedResearch({ userId, researchRunId, onEvent }),
     collectNews(onEvent),
     collectMacroData(onEvent),
     collectConsumerSales(onEvent),
     jsonDatasetIndicators.collectJsonDatasetIndicators({ onEvent }),
+    censusBfs.collectBusinessFormationStatistics({ userId, onEvent }),
+    censusBds.collectBusinessDynamicsStatistics({ userId, onEvent }),
   ]);
   meshTell({
     conversation: meshConversation,
@@ -119,6 +144,10 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
       macroIndicators: macro.indicators.length,
       consumerReports: consumer.reports.length,
       jsonDatasetSources: jsonDatasets.sourceList?.length || 0,
+      businessFormationAvailable: businessFormation.available,
+      businessFormationMomentum: businessFormation.momentum,
+      businessDynamicsAvailable: businessDynamics.available,
+      businessDynamicsMomentum: businessDynamics.momentum,
     },
     userId,
     researchRunId,
@@ -134,12 +163,50 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
     valuableArticles.map((article) => crawleeCrawler.crawlFromArticle({ article, onEvent }))
   );
   learned.entityLeads = learned.entityLeads || [];
+  learned.entityLeads.push(...(news.entityLeads || []));
   for (const result of deepCrawlResults) {
     if (result.status !== 'fulfilled') continue;
     learned.observations.push(
       ...result.value.pages.map((page) => ({ title: page.title, excerpt: page.excerpt, url: page.url }))
     );
     learned.entityLeads.push(...result.value.entityLeads);
+  }
+
+  const comprehension = await articleComprehension.comprehendArticles({
+    userId,
+    articles: valuableArticles.map((article) => ({ title: article.title, url: article.link, excerpt: article.description })),
+    onEvent,
+  });
+  if (comprehension.inferredCompanies.length) {
+    learned.entityLeads.push(
+      ...comprehension.inferredCompanies.map((company) => ({
+        key: `llm:${(company.symbol || company.name).toLowerCase()}`,
+        name: company.name,
+        symbol: company.symbol,
+        type: 'llm-inferred',
+        score: 6,
+        evidence: [{ title: 'LLM article comprehension', url: '', reason: company.reason }],
+      }))
+    );
+  }
+  if (comprehension.followUpQueries.length) {
+    emit(onEvent, 'article-comprehension-crawl', 13, 'info', 'Crawling follow-up questions generated from article comprehension.', {
+      queries: comprehension.followUpQueries,
+    });
+    try {
+      const followUpResult = await crawleeCrawler.crawlAutonomousResearch({
+        queries: comprehension.followUpQueries,
+        maxRequests: 12,
+        maxWaves: 2,
+        onEvent,
+      });
+      learned.observations.push(
+        ...followUpResult.pages.map((page) => ({ title: page.title, excerpt: page.excerpt, url: page.url }))
+      );
+      learned.entityLeads.push(...followUpResult.entityLeads);
+    } catch (error) {
+      logger.warn('Follow-up crawl from article comprehension failed', { error: error.message });
+    }
   }
 
   const crawledDiscoveredCompanies = companyDiscovery.discoverCompanies({ news, learned, maxCandidates: 36 });
@@ -178,6 +245,8 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
     macro,
     consumer,
     jsonDatasets,
+    businessFormation,
+    businessDynamics,
     discoveredCompanies: initialDiscoveredCompanies,
     onEvent,
   });
@@ -199,7 +268,7 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
     userId,
     researchRunId,
   });
-  const prePlan = buildPrePlan({ watchlist, news, macro, consumer, learned, jsonDatasets, chatResearch: chatResearchResult, discoveredCompanies: initialDiscoveredCompanies });
+  const prePlan = buildPrePlan({ watchlist, news, macro, consumer, learned, jsonDatasets, businessFormation, businessDynamics, chatResearch: chatResearchResult, discoveredCompanies: initialDiscoveredCompanies });
   meshTell({
     conversation: meshConversation,
     from: 'brain.discovery.company',
@@ -236,7 +305,7 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
     onEvent,
   });
   const investorPlaybookSummary = investorPlaybook.getPlaybookSummary();
-  const scored = scoreCandidates({ userId, candidates: prePlan.candidates, quotes, news, macro, consumer, learned, companyIntel, jsonDatasets, onEvent });
+  const scored = scoreCandidates({ userId, candidates: prePlan.candidates, quotes, news, macro, consumer, learned, companyIntel, jsonDatasets, businessFormation, businessDynamics, onEvent });
 
   for (const signal of scored) {
     try {
@@ -291,17 +360,32 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
         ...macro.sources,
         ...consumer.sources,
         ...jsonDatasets.sourceList,
+        ...businessFormation.sourceList,
+        ...businessDynamics.sourceList,
         {
           name: investorPlaybookSummary.title,
           type: investorPlaybookSummary.source?.type || 'local-research-artifact',
           url: investorPlaybookSummary.source?.path || 'tmp/data.json',
           investorCount: investorPlaybookSummary.investorCount,
         },
+        {
+          name: 'SEC company submissions API',
+          type: 'regulatory-filings-api',
+          url: 'https://data.sec.gov/submissions/CIK##########.json',
+          tickerDirectoryUrl: 'https://www.sec.gov/files/company_tickers.json',
+        },
         { name: 'Finnhub quote API', type: 'market-data', url: 'https://finnhub.io/docs/api/quote' },
         { name: 'Yahoo Finance chart scrape fallback', type: 'market-data', url: 'https://query1.finance.yahoo.com/v8/finance/chart/SPY' },
         { name: 'Stooq CSV quote scrape fallback', type: 'market-data', url: 'https://stooq.com/q/l/' },
       ],
       newsBrief: news.items.slice(0, 10),
+      gdelt: news.gdelt ? {
+        available: news.gdelt.available,
+        summary: news.gdelt.summary,
+        articleCount: news.gdelt.articles?.length || 0,
+        entityLeadCount: news.gdelt.entityLeads?.length || 0,
+        failures: news.gdelt.failures || [],
+      } : null,
       learnedResearch: {
         observations: learned.observations.slice(0, 12).map((item) => ({
           url: item.url,
@@ -317,6 +401,8 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
       discoveredCompanies: prePlan.discoveredCompanies,
       macro,
       consumer,
+      businessFormation,
+      businessDynamics,
       prePlan,
       evaluator: {
         localModel: 'brain.js NeuralNetwork via persisted JSON model',
@@ -331,6 +417,8 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
           'broker factor intelligence',
           'high-earning investor indicator playbook',
           'public JSON dataset context',
+          'Census business formation momentum',
+          'Census business dynamics trend',
         ],
       },
       jsonDatasets,
@@ -342,7 +430,7 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
         summary: record.summary.summary,
         factors: record.summary.factors,
       })),
-      reportNarrative: buildResearchNarrative({ scored, news, macro, consumer, learned, investorPlaybookSummary, jsonDatasets }),
+      reportNarrative: buildResearchNarrative({ scored, news, macro, consumer, learned, investorPlaybookSummary, jsonDatasets, businessFormation, businessDynamics }),
       evidence: quotes.map((q) => ({
         symbol: q.symbol,
         current: q.current,
@@ -478,16 +566,20 @@ async function collectQuotes(symbols, { userId, onEvent }) {
 }
 
 async function collectNews(onEvent) {
-  const settled = await Promise.allSettled(
-    NEWS_FEEDS.map(async (feed) => {
-      const text = await fetchText(feed.url, 7000);
-      return { feed, items: parseRssItems(text, feed).slice(0, 8) };
-    })
-  );
+  const [rssSettled, gdeltResult] = await Promise.all([
+    Promise.allSettled(
+      NEWS_FEEDS.map(async (feed) => {
+        const text = await fetchText(feed.url, 7000);
+        return { feed, items: parseRssItems(text, feed).slice(0, 8) };
+      })
+    ),
+    gdeltDoc.collectGdeltResearch({ onEvent }),
+  ]);
 
   const items = [];
   const sources = [];
-  for (const result of settled) {
+  const entityLeads = [];
+  for (const result of rssSettled) {
     if (result.status === 'fulfilled') {
       sources.push({ name: result.value.feed.name, type: 'news-rss', region: result.value.feed.region, url: result.value.feed.url });
       items.push(...result.value.items);
@@ -497,8 +589,23 @@ async function collectNews(onEvent) {
       });
     }
   }
-  emit(onEvent, 'news', 24, 'debug', 'News scan complete.', { articles: items.length, sources: sources.length });
-  return { items, sources };
+  if (gdeltResult?.articles?.length) {
+    items.push(...gdeltResult.articles);
+    sources.push(...gdeltResult.sources);
+    entityLeads.push(...gdeltResult.entityLeads);
+  }
+  emit(onEvent, 'news', 24, 'debug', 'News scan complete.', {
+    articles: items.length,
+    sources: sources.length,
+    gdeltArticles: gdeltResult?.articles?.length || 0,
+    gdeltEntityLeads: entityLeads.length,
+  });
+  return {
+    items: dedupeNewsItems(items),
+    sources,
+    entityLeads,
+    gdelt: gdeltResult,
+  };
 }
 
 async function collectMacroData(onEvent) {
@@ -578,7 +685,7 @@ async function collectConsumerSales(onEvent) {
   return payload;
 }
 
-function buildPrePlan({ watchlist, news, macro, consumer, learned, jsonDatasets, chatResearch: chatResearchResult, discoveredCompanies: providedDiscoveredCompanies }) {
+function buildPrePlan({ watchlist, news, macro, consumer, learned, jsonDatasets, businessFormation, businessDynamics, chatResearch: chatResearchResult, discoveredCompanies: providedDiscoveredCompanies }) {
   const text = [
     news.items.map((item) => `${item.title} ${item.description}`).join(' '),
     learned.observations.map((item) => `${item.title} ${item.excerpt}`).join(' '),
@@ -646,6 +753,10 @@ function buildPrePlan({ watchlist, news, macro, consumer, learned, jsonDatasets,
     consumerBias: consumer.consumerBias,
     jsonDatasetRiskScore: jsonDatasets?.compositeRiskScore,
     jsonDatasetOpportunityScore: jsonDatasets?.opportunityScore,
+    businessFormationMomentum: businessFormation?.momentum,
+    businessFormationOpportunityScore: businessFormation?.opportunityScore,
+    businessDynamicsMomentum: businessDynamics?.momentum,
+    businessDynamicsOpportunityScore: businessDynamics?.opportunityScore,
     learnedSourceCount: learned.learnedSources.length,
     learnedObservationCount: learned.observations.length,
     discoveredCompanies,
@@ -662,7 +773,7 @@ function buildPrePlan({ watchlist, news, macro, consumer, learned, jsonDatasets,
   };
 }
 
-function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, learned, companyIntel, jsonDatasets, onEvent }) {
+function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, learned, companyIntel, jsonDatasets, businessFormation, businessDynamics, onEvent }) {
   const quoteBySymbol = new Map(quotes.map((quote) => [quote.symbol, quote]));
   const intelBySymbol = new Map(companyIntel.records.map((record) => [record.symbol, record]));
   const newsText = [
@@ -698,6 +809,14 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
       companyRecord: intelBySymbol.get(candidate.symbol),
       datasetContext: jsonDatasets,
     });
+    const businessFormationIntel = censusBfs.scoreCandidate({
+      candidate,
+      bfsContext: businessFormation,
+    });
+    const businessDynamicsIntel = censusBds.scoreCandidate({
+      candidate,
+      bdsContext: businessDynamics,
+    });
     const eventWeightIntel = financialEventWeights.scoreCandidateEvidence({
       candidate,
       news,
@@ -713,8 +832,11 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
       consumer: consumerStrength,
       brokerFactors: factorIntel.normalized,
       historicalWatchFactors: factorIntel.historicalWatchNormalized ?? 0.5,
+      secFilingHistory: factorIntel.secFilingNormalized ?? 0.5,
       investorPlaybook: playbookIntel.normalized,
       jsonDatasets: datasetIntel.normalized,
+      businessFormation: businessFormationIntel.normalized,
+      businessDynamics: businessDynamicsIntel.normalized,
       financialEvents: eventWeightIntel.normalized,
     };
     const output = net.run(input);
@@ -762,6 +884,8 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
       brokerFactorScore: factorIntel.compositeScore,
       investorPlaybookScore: playbookIntel.compositeScore,
       jsonDatasetScore: datasetIntel.compositeScore,
+      businessFormationScore: businessFormationIntel.compositeScore,
+      businessDynamicsScore: businessDynamicsIntel.compositeScore,
       financialEventScore: eventWeightIntel.aggregateScore,
       brainModelKey: record.model_key,
       evidence: {
@@ -788,8 +912,13 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
           ...historicalWatchFactors.map((factor) => (
             `${factor.label} ${factor.score}: ${factor.stance}`
           )),
+          ...(factorIntel.secFilingFactor ? [
+            `SEC filing history ${factorIntel.secFilingFactor.score}: ${factorIntel.secFilingFactor.stance} (${factorIntel.secFilingFactor.latestForm || 'no latest form'} ${factorIntel.secFilingFactor.latestFilingDate || 'unknown date'})`,
+          ] : []),
           `Investor playbook score ${playbookIntel.compositeScore}`,
           `Public JSON dataset score ${datasetIntel.compositeScore}`,
+          `Census BFS score ${businessFormationIntel.compositeScore}: ${businessFormationIntel.explanation}`,
+          `Census BDS score ${businessDynamicsIntel.compositeScore}: ${businessDynamicsIntel.explanation}`,
           `WEIGHT.md event score ${eventWeightIntel.aggregateScore} (${eventWeightIntel.topEvents.length} weighted events)`,
           ...datasetIntel.explanations,
           ...eventWeightIntel.topEvents.slice(0, 4).map((event) => (
@@ -813,6 +942,34 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
           compositeRiskScore: jsonDatasets?.compositeRiskScore,
           opportunityScore: jsonDatasets?.opportunityScore,
         },
+        businessFormation: {
+          score: businessFormationIntel.compositeScore,
+          normalized: businessFormationIntel.normalized,
+          exposure: businessFormationIntel.exposure,
+          topSeries: businessFormationIntel.topSeries,
+          context: businessFormation ? {
+            available: businessFormation.available,
+            momentum: businessFormation.momentum,
+            opportunityScore: businessFormation.opportunityScore,
+            riskScore: businessFormation.riskScore,
+            averageGrowthPct: businessFormation.averageGrowthPct,
+            latestPeriod: businessFormation.latestPeriod,
+          } : null,
+        },
+        businessDynamics: {
+          score: businessDynamicsIntel.compositeScore,
+          normalized: businessDynamicsIntel.normalized,
+          exposure: businessDynamicsIntel.exposure,
+          topMetrics: businessDynamicsIntel.topMetrics,
+          context: businessDynamics ? {
+            available: businessDynamics.available,
+            momentum: businessDynamics.momentum,
+            opportunityScore: businessDynamics.opportunityScore,
+            riskScore: businessDynamics.riskScore,
+            netDynamismPct: businessDynamics.netDynamismPct,
+            latestYear: businessDynamics.latestYear,
+          } : null,
+        },
         financialEvents: {
           model: eventWeightIntel.model,
           aggregateScore: eventWeightIntel.aggregateScore,
@@ -824,6 +981,7 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
         discovery: candidate.discovery || null,
         chatResearch: candidate.chatResearch || null,
         historicalWatchFactors,
+        secFilingHistory: factorIntel.secFilingFactor,
       },
     });
   }
@@ -844,39 +1002,41 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
 // regression ensemble member, so they're two independently-fit models over
 // the same labeled feature space rather than one model wearing two hats.
 const CANDIDATE_SCORER_TRAINING_DATA = [
-  { input: { momentum: 0.9, volatility: 0.25, news: 0.85, theme: 0.8, macroRisk: 0.15, consumer: 0.8, brokerFactors: 0.9, historicalWatchFactors: 0.88, investorPlaybook: 0.9, jsonDatasets: 0.85, financialEvents: 0.92 }, output: { score: 0.95 } },
-  { input: { momentum: 0.75, volatility: 0.35, news: 0.65, theme: 0.55, macroRisk: 0.35, consumer: 0.6, brokerFactors: 0.75, historicalWatchFactors: 0.72, investorPlaybook: 0.78, jsonDatasets: 0.72, financialEvents: 0.72 }, output: { score: 0.78 } },
-  { input: { momentum: 0.55, volatility: 0.45, news: 0.5, theme: 0.35, macroRisk: 0.45, consumer: 0.5, brokerFactors: 0.55, historicalWatchFactors: 0.52, investorPlaybook: 0.55, jsonDatasets: 0.5, financialEvents: 0.5 }, output: { score: 0.52 } },
-  { input: { momentum: 0.25, volatility: 0.8, news: 0.25, theme: 0.2, macroRisk: 0.75, consumer: 0.35, brokerFactors: 0.25, historicalWatchFactors: 0.2, investorPlaybook: 0.24, jsonDatasets: 0.22, financialEvents: 0.18 }, output: { score: 0.13 } },
-  { input: { momentum: 0.75, volatility: 0.9, news: 0.4, theme: 0.4, macroRisk: 0.8, consumer: 0.4, brokerFactors: 0.35, historicalWatchFactors: 0.32, investorPlaybook: 0.34, jsonDatasets: 0.3, financialEvents: 0.28 }, output: { score: 0.27 } },
-  { input: { momentum: 0.35, volatility: 0.2, news: 0.7, theme: 0.65, macroRisk: 0.25, consumer: 0.75, brokerFactors: 0.7, historicalWatchFactors: 0.68, investorPlaybook: 0.74, jsonDatasets: 0.76, financialEvents: 0.76 }, output: { score: 0.68 } },
-  { input: { momentum: 0.65, volatility: 0.3, news: 0.45, theme: 0.35, macroRisk: 0.4, consumer: 0.45, brokerFactors: 0.85, historicalWatchFactors: 0.8, investorPlaybook: 0.82, jsonDatasets: 0.7, financialEvents: 0.68 }, output: { score: 0.72 } },
+  { input: { momentum: 0.9, volatility: 0.25, news: 0.85, theme: 0.8, macroRisk: 0.15, consumer: 0.8, brokerFactors: 0.9, historicalWatchFactors: 0.88, secFilingHistory: 0.7, investorPlaybook: 0.9, jsonDatasets: 0.85, businessFormation: 0.78, businessDynamics: 0.8, financialEvents: 0.92 }, output: { score: 0.95 } },
+  { input: { momentum: 0.75, volatility: 0.35, news: 0.65, theme: 0.55, macroRisk: 0.35, consumer: 0.6, brokerFactors: 0.75, historicalWatchFactors: 0.72, secFilingHistory: 0.68, investorPlaybook: 0.78, jsonDatasets: 0.72, businessFormation: 0.68, businessDynamics: 0.66, financialEvents: 0.72 }, output: { score: 0.78 } },
+  { input: { momentum: 0.55, volatility: 0.45, news: 0.5, theme: 0.35, macroRisk: 0.45, consumer: 0.5, brokerFactors: 0.55, historicalWatchFactors: 0.52, secFilingHistory: 0.54, investorPlaybook: 0.55, jsonDatasets: 0.5, businessFormation: 0.52, businessDynamics: 0.5, financialEvents: 0.5 }, output: { score: 0.52 } },
+  { input: { momentum: 0.25, volatility: 0.8, news: 0.25, theme: 0.2, macroRisk: 0.75, consumer: 0.35, brokerFactors: 0.25, historicalWatchFactors: 0.2, secFilingHistory: 0.38, investorPlaybook: 0.24, jsonDatasets: 0.22, businessFormation: 0.34, businessDynamics: 0.28, financialEvents: 0.18 }, output: { score: 0.13 } },
+  { input: { momentum: 0.75, volatility: 0.9, news: 0.4, theme: 0.4, macroRisk: 0.8, consumer: 0.4, brokerFactors: 0.35, historicalWatchFactors: 0.32, secFilingHistory: 0.4, investorPlaybook: 0.34, jsonDatasets: 0.3, businessFormation: 0.36, businessDynamics: 0.32, financialEvents: 0.28 }, output: { score: 0.27 } },
+  { input: { momentum: 0.35, volatility: 0.2, news: 0.7, theme: 0.65, macroRisk: 0.25, consumer: 0.75, brokerFactors: 0.7, historicalWatchFactors: 0.68, secFilingHistory: 0.66, investorPlaybook: 0.74, jsonDatasets: 0.76, businessFormation: 0.72, businessDynamics: 0.76, financialEvents: 0.76 }, output: { score: 0.68 } },
+  { input: { momentum: 0.65, volatility: 0.3, news: 0.45, theme: 0.35, macroRisk: 0.4, consumer: 0.45, brokerFactors: 0.85, historicalWatchFactors: 0.8, secFilingHistory: 0.68, investorPlaybook: 0.82, jsonDatasets: 0.7, businessFormation: 0.62, businessDynamics: 0.58, financialEvents: 0.68 }, output: { score: 0.72 } },
 ];
 
 function buildBrainScorer(userId) {
   return brainModelService.loadOrTrain({
     userId,
-    modelKey: 'candidate-factor-scorer-v6-history-watch-factors',
+    modelKey: 'candidate-factor-scorer-v9-census-bds',
     hiddenLayers: [10, 6],
     iterations: 100,
     metadata: {
-      purpose: 'Scores trade candidates using market signals, broker-style factor intelligence, historical watch factors, high-earning investor playbooks, public JSON dataset context, and WEIGHT.md financial-event multipliers.',
+      purpose: 'Scores trade candidates using market signals, broker-style factor intelligence, SEC filing recency/history, historical watch factors, Census BFS formation momentum, Census BDS annual business-dynamics trend, high-earning investor playbooks, public JSON dataset context, and WEIGHT.md financial-event multipliers.',
       exportedFormat: 'brain.js toJSON',
-      inputFeatures: ['momentum', 'volatility', 'news', 'theme', 'macroRisk', 'consumer', 'brokerFactors', 'historicalWatchFactors', 'investorPlaybook', 'jsonDatasets', 'financialEvents'],
+      inputFeatures: ['momentum', 'volatility', 'news', 'theme', 'macroRisk', 'consumer', 'brokerFactors', 'historicalWatchFactors', 'secFilingHistory', 'investorPlaybook', 'jsonDatasets', 'businessFormation', 'businessDynamics', 'financialEvents'],
     },
     trainingData: CANDIDATE_SCORER_TRAINING_DATA,
   });
 }
 
-function buildResearchNarrative({ scored, news, macro, consumer, learned, investorPlaybookSummary, jsonDatasets }) {
+function buildResearchNarrative({ scored, news, macro, consumer, learned, investorPlaybookSummary, jsonDatasets, businessFormation, businessDynamics }) {
   const leaders = scored.slice(0, 3).map((s) => `${s.symbol} (${s.localAiScore})`).join(', ') || 'none';
   return {
-    summary: `Autonomous scan ranked ${leaders} highest after blending news, learned web sources, macro, consumer-sales, quote momentum, company factors, historical growth/value/split watch factors, investor playbook indicators, public JSON dataset signals, and WEIGHT.md event multipliers.`,
+    summary: `Autonomous scan ranked ${leaders} highest after blending news, learned web sources, macro, consumer-sales, Census BFS business-formation momentum, Census BDS business-dynamics trends, quote momentum, company factors, SEC filing history, historical growth/value/split watch factors, investor playbook indicators, public JSON dataset signals, and WEIGHT.md event multipliers.`,
     newsItemCount: news.items.length,
     learnedSourceCount: learned.learnedSources.length,
     learnedObservationCount: learned.observations.length,
     investorPlaybook: investorPlaybookSummary,
     jsonDatasets,
+    businessFormation,
+    businessDynamics,
     macroIndicators: macro.indicators,
     consumerReports: consumer.reports,
     topCandidates: scored.slice(0, 5).map((s) => ({
@@ -885,6 +1045,9 @@ function buildResearchNarrative({ scored, news, macro, consumer, learned, invest
       bias: s.actionBias,
       financialEventScore: s.financialEventScore,
       historicalWatchFactors: s.evidence.historicalWatchFactors,
+      secFilingHistory: s.evidence.secFilingHistory,
+      businessFormation: s.evidence.businessFormation,
+      businessDynamics: s.evidence.businessDynamics,
       reasons: s.evidence.explanation,
     })),
   };
@@ -963,6 +1126,18 @@ function parseRssItems(xml, feed) {
       description: stripTags(decodeXml(pickTag(item, 'description'))).slice(0, 280),
     };
   });
+}
+
+function dedupeNewsItems(items) {
+  const seen = new Set();
+  const deduped = [];
+  for (const item of items || []) {
+    const key = item.link || item.url || item.title;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(item);
+  }
+  return deduped;
 }
 
 function pickTag(xml, tag) {

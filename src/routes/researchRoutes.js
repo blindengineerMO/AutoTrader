@@ -15,7 +15,7 @@ const safeResearchMvpService = require('../services/spec/safeResearchMvpService'
 const modelPromotionService = require('../services/spec/modelPromotionService');
 const { runTradingCycle } = require('../services/tradingCycle');
 const MockBrokerClient = require('../services/broker/MockBrokerClient');
-const RobinhoodBrokerClient = require('../services/broker/RobinhoodBrokerClient');
+const AlpacaBrokerClient = require('../services/broker/AlpacaBrokerClient');
 const logger = require('../utils/logger');
 
 const router = express.Router();
@@ -167,21 +167,19 @@ router.post('/collect/process', startCollectProcess);
 router.post('/collect-process-research', startCollectProcess);
 
 // Manual trigger for a research + strategy cycle. Runs against a mock broker
-// unless a real Robinhood account has been wired up, so this is safe to call
-// while testing.
+// unless Alpaca is configured and reachable, so this is safe to call while testing.
 router.post('/run-cycle', async (req, res) => {
   try {
-    const robinhood = new RobinhoodBrokerClient({ userId: req.user.id });
+    const alpaca = new AlpacaBrokerClient({ userId: req.user.id });
     let broker = new MockBrokerClient();
-    let modeReason = 'Robinhood credentials are not configured.';
-    if (robinhood.isConfigured()) {
+    let modeReason = 'Alpaca credentials are not configured.';
+    if (alpaca.isConfigured()) {
       try {
-        await robinhood.connect();
-        robinhood.live = true;
-        broker = robinhood;
+        await alpaca.connect();
+        broker = alpaca;
         modeReason = null;
       } catch (err) {
-        modeReason = `Robinhood live connection unavailable: ${err.message}`;
+        modeReason = `Alpaca live connection unavailable: ${err.message}`;
       }
     }
     const plan = await runTradingCycle({ userId: req.user.id, broker, modeReason });
@@ -243,34 +241,33 @@ async function runAutonomousResearchOperation({ userId, runId }) {
 }
 
 async function resolveBroker(userId, onEvent = () => {}) {
-  const robinhood = new RobinhoodBrokerClient({ userId });
+  const alpaca = new AlpacaBrokerClient({ userId });
   let broker = new MockBrokerClient();
-  let modeReason = 'Robinhood credentials are not configured.';
+  let modeReason = 'Alpaca credentials are not configured.';
   onEvent({
     phase: 'broker',
     progress: 4,
     level: 'debug',
-    message: 'Checking Robinhood live-readiness before deciding live vs simulation mode.',
+    message: 'Checking Alpaca live-readiness before deciding live vs simulation mode.',
   });
-  if (robinhood.isConfigured()) {
+  if (alpaca.isConfigured()) {
     try {
-      await robinhood.connect();
-      robinhood.live = true;
-      broker = robinhood;
+      await alpaca.connect();
+      broker = alpaca;
       modeReason = null;
       onEvent({
         phase: 'broker',
         progress: 5,
         level: 'info',
-        message: 'Robinhood connection is configured; live mode remains subject to kill switch and settings.',
+        message: 'Alpaca connection is configured; live mode remains subject to kill switch and settings.',
       });
     } catch (err) {
-      modeReason = `Robinhood live connection unavailable: ${err.message}`;
+      modeReason = `Alpaca live connection unavailable: ${err.message}`;
       onEvent({
         phase: 'broker',
         progress: 5,
         level: 'warn',
-        message: 'Robinhood connection failed; operation will produce a simulation report.',
+        message: 'Alpaca connection failed; operation will produce a simulation report.',
         data: { error: err.message },
       });
     }
@@ -279,7 +276,7 @@ async function resolveBroker(userId, onEvent = () => {}) {
       phase: 'broker',
       progress: 5,
       level: 'warn',
-      message: 'Robinhood credentials missing; operation will produce a simulation report.',
+      message: 'Alpaca credentials missing; operation will produce a simulation report.',
     });
   }
   return { broker, modeReason };

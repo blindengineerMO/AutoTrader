@@ -335,12 +335,21 @@
       </div>
 
       <div class="bento-span-4 flex flex-col gap-5 xl:mt-20">
+        <GlassCard v-if="auth.isAdmin" title="User management">
+          <p class="text-white/50 text-sm mb-4">
+            Create operators, set access roles, disable accounts, and reset passwords.
+          </p>
+          <GlassButton class="!w-full justify-center" @click="router.push({ name: 'users' })">
+            Open Users workspace
+          </GlassButton>
+        </GlassCard>
+
         <GlassCard title="Execution mode" :tone="killSwitchEngaged || !form.tradingEnabled ? 'danger' : 'default'">
           <div class="font-headline text-4xl" :class="form.tradingEnabled && !killSwitchEngaged ? 'text-accent' : 'text-danger'">
             {{ form.tradingEnabled && !killSwitchEngaged ? 'LIVE READY' : 'SIMULATION' }}
           </div>
           <p class="text-white/45 text-sm mt-3">
-            Scheduled cycles continue in simulation whenever trading is paused, the kill switch is engaged, or Robinhood is unavailable.
+            Scheduled cycles continue in simulation whenever trading is paused, the kill switch is engaged, or Alpaca is unavailable.
           </p>
         </GlassCard>
 
@@ -359,10 +368,14 @@
 
 <script setup>
 import { ref, onMounted } from 'vue';
+import { useRouter } from 'vue-router';
 import api from '../api/client';
 import GlassCard from '../components/GlassCard.vue';
 import GlassButton from '../components/GlassButton.vue';
+import { useAuthStore } from '../stores/auth';
 
+const auth = useAuthStore();
+const router = useRouter();
 const form = ref({
   tradingEnabled: false,
   dailyLossLimitUsd: 10,
