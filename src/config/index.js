@@ -34,6 +34,9 @@ const config = {
   geminiApiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '',
   geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
 
+  ollamaBaseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434/v1',
+  ollamaModel: process.env.OLLAMA_MODEL || 'llama3.1',
+
   duckAiResearch: {
     publicUrl: process.env.DUCK_AI_PUBLIC_URL || 'https://duck.ai/',
     sanctionedEndpoint: process.env.DUCK_AI_SANCTIONED_ENDPOINT || '',
@@ -45,6 +48,10 @@ const config = {
   },
 
   finnhubApiKey: process.env.FINNHUB_API_KEY || '',
+  openAlexApiKey: process.env.OPENALEX_API_KEY || '',
+  openFdaApiKey: process.env.OPENFDA_API_KEY || '',
+  reliefWebAppName: process.env.RELIEFWEB_APP_NAME || '',
+  nwsUserAgent: process.env.NWS_USER_AGENT || process.env.NOAA_USER_AGENT || '',
 
   secEdgarUserAgent: process.env.SEC_EDGAR_USER_AGENT || '',
 

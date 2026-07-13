@@ -269,4 +269,5 @@ module.exports = {
   summarizeEvaluations,
   updateEnsembleWeights,
   checkModelDrift,
+  classifyOutcome,
 };

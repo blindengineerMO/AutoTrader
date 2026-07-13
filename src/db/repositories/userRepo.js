@@ -5,13 +5,16 @@ const findByEmail = db.prepare('SELECT * FROM users WHERE email = ?');
 const findById = db.prepare('SELECT * FROM users WHERE id = ?');
 const listUsers = db.prepare('SELECT * FROM users ORDER BY id');
 const insertSettings = db.prepare(
-  'INSERT INTO user_settings (user_id, daily_loss_limit_usd, max_trades_per_symbol_per_24h) VALUES (?, ?, ?)'
+  `INSERT INTO user_settings (
+     user_id, daily_loss_limit_usd, max_trades_per_symbol_per_24h,
+     watcher_cycle_cadence_cron, personality_tick_cadence_cron
+   ) VALUES (?, ?, ?, ?, ?)`
 );
 
 function createUser({ email, passwordHash, dailyLossLimitUsd, maxTradesPerSymbolPer24h }) {
   const createTx = db.transaction(() => {
     const { lastInsertRowid } = insertUser.run(email, passwordHash);
-    insertSettings.run(lastInsertRowid, dailyLossLimitUsd, maxTradesPerSymbolPer24h);
+    insertSettings.run(lastInsertRowid, dailyLossLimitUsd, maxTradesPerSymbolPer24h, '0 * * * *', '0 * * * *');
     return lastInsertRowid;
   });
   const id = createTx();

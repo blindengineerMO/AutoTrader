@@ -109,7 +109,15 @@
               <div class="factor-meter mt-3" :style="{ '--score': `${factor.value.score || 0}%` }"></div>
               <p class="mt-3">{{ factor.value.rationale }}</p>
               <small v-if="factor.value.fiveYearReturnPct !== undefined">
-                5y return {{ pct(factor.value.fiveYearReturnPct) }} · drawdown {{ pct(factor.value.maxDrawdownPct) }}
+                5y return {{ pct(factor.value.fiveYearReturnPct) }}
+                <template v-if="factor.value.annualizedReturnPct !== undefined"> · annual {{ pct(factor.value.annualizedReturnPct) }}</template>
+                <template v-if="factor.value.maxDrawdownPct !== undefined"> · drawdown {{ pct(factor.value.maxDrawdownPct) }}</template>
+              </small>
+              <small v-else-if="factor.value.valueChangePct !== undefined">
+                value {{ pct(factor.value.valueChangePct) }} · from ${{ fmt(factor.value.firstClose) }} to ${{ fmt(factor.value.lastClose) }}
+              </small>
+              <small v-else-if="factor.value.stockSplitsPast5Years !== undefined">
+                splits {{ factor.value.stockSplitsPast5Years }} in 5y
               </small>
               <small v-else-if="factor.value.oilChangePct !== undefined">Oil move {{ pct(factor.value.oilChangePct) }}</small>
               <small v-else-if="factor.value.populationGrowthPct !== undefined">
@@ -183,6 +191,10 @@ const factorLabels = {
   lowCostHighYield: 'Low-cost high-yield profile',
   populationDemand: 'Population demand',
   deepHistoryTrend: 'Deep company history',
+  companyGrowthTrend: 'Company growth / decline',
+  companyValueTrend: 'Company value over time',
+  fiveYearSplitActivity: '5-year stock splits',
+  localEventExposure: 'Local event exposure',
 };
 
 const selectedCompany = computed(() => {

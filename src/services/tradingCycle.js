@@ -11,6 +11,7 @@ const rulesEngine = require('./rulesEngine');
 const { buildDecisionReport } = require('./decisionReportService');
 const settingsRepo = require('../db/repositories/settingsRepo');
 const alertingService = require('./alertingService');
+const simulationAccountReconciliation = require('./simulationAccountReconciliationService');
 const logger = require('../utils/logger');
 
 /**
@@ -51,25 +52,37 @@ async function runTradingCycleInner({
     signals: researchSnapshot.signals.length,
   });
 
-  const brokerAccount = brokerAccountRepo.ensureDefault(userId);
+  let brokerAccount = brokerAccountRepo.ensureDefault(userId);
+  const settings = settingsRepo.get(userId);
+  const persistentSimulation = Boolean(settings?.simulation_mode_enabled);
+  if (persistentSimulation) {
+    brokerAccount = simulationAccountReconciliation.reconcileSimulationAccount(userId, settings);
+  }
   emit(onEvent, 'broker', 82, 'debug', 'Loading account state and safety settings.');
   let accountState;
   let brokerConnectionFailed = false;
-  try {
-    accountState = await broker.getAccountState();
-  } catch (error) {
-    brokerConnectionFailed = true;
-    const reason = `Broker connection/account-state call failed: ${error.message}`;
-    settingsRepo.engageAutoKillSwitch(userId, 'broker_connection_kill_switch', reason);
-    alertingService.alertKillSwitch({ userId, switchName: 'broker_connection_kill_switch', reason });
-    logger.error('Broker connection failed; tripped broker_connection_kill_switch and falling back to simulation.', {
-      userId,
-      error: error.message,
-    });
-    accountState = { cashUsd: 0, buyingPowerUsd: 0 };
+  if (persistentSimulation) {
+    accountState = {
+      cashUsd: Number(brokerAccount.cash_balance_usd || 0),
+      buyingPowerUsd: Number(brokerAccount.buying_power_usd || brokerAccount.cash_balance_usd || 0),
+    };
+  } else {
+    try {
+      accountState = await broker.getAccountState();
+    } catch (error) {
+      brokerConnectionFailed = true;
+      const reason = `Broker connection/account-state call failed: ${error.message}`;
+      settingsRepo.engageAutoKillSwitch(userId, 'broker_connection_kill_switch', reason);
+      alertingService.alertKillSwitch({ userId, switchName: 'broker_connection_kill_switch', reason });
+      logger.error('Broker connection failed; tripped broker_connection_kill_switch and falling back to simulation.', {
+        userId,
+        error: error.message,
+      });
+      accountState = { cashUsd: 0, buyingPowerUsd: 0 };
+    }
   }
-  const settings = settingsRepo.get(userId);
   const liveReady =
+    !persistentSimulation &&
     !brokerConnectionFailed &&
     (executionMode === 'live' ||
       (executionMode === 'auto' && settings?.trading_enabled && !settingsRepo.isAnyKillSwitchEngaged(settings) && broker?.live === true));
@@ -164,8 +177,13 @@ async function runTradingCycleInner({
       continue;
     }
     if (mode === 'simulation') {
-      tradingPlanRepo.setActionStatus(action.id, `simulated_would_${action.action}`);
-      recordSimulatedLedgerEntry({ userId, brokerAccount, action, researchSnapshot });
+      if (persistentSimulation) {
+        const result = recordPersistentSimulatedFill({ userId, brokerAccount, action, researchSnapshot });
+        tradingPlanRepo.setActionStatus(action.id, result.status);
+      } else {
+        tradingPlanRepo.setActionStatus(action.id, `simulated_would_${action.action}`);
+        recordSimulatedLedgerEntry({ userId, brokerAccount, action, researchSnapshot });
+      }
       continue;
     }
     await executeAction({ userId, brokerAccount, broker, action, researchSnapshot });
@@ -300,6 +318,69 @@ function recordSimulatedLedgerEntry({ userId, brokerAccount, action, researchSna
     sourceType: 'simulation',
     memo: `Simulated would ${action.action} ${action.quantity || 0} ${action.symbol} @ ${signal?.price || 0}`,
   });
+}
+
+function recordPersistentSimulatedFill({ userId, brokerAccount, action, researchSnapshot }) {
+  const signal = researchSnapshot.signals.find((s) => s.symbol === action.symbol);
+  const fillPrice = Number(signal?.price || 0);
+  const quantity = Number(action.quantity || 0);
+  const notional = fillPrice * quantity;
+  if (!fillPrice || !quantity || notional <= 0) return { status: 'simulated_rejected: invalid quantity or price' };
+
+  const latestAccount = brokerAccountRepo.getDefault(userId) || brokerAccount;
+  const currentCash = Number(latestAccount.cash_balance_usd || 0);
+  const existingPosition = positionRepo.listByUser(userId).find((position) => position.symbol === action.symbol);
+  if (action.action === 'buy' && notional > currentCash) {
+    return { status: `simulated_rejected: insufficient simulation cash for $${notional.toFixed(2)}` };
+  }
+  if (action.action === 'sell' && Number(existingPosition?.quantity || 0) < quantity) {
+    return { status: 'simulated_rejected: insufficient simulated position quantity' };
+  }
+
+  const order = orderRepo.create({
+    userId,
+    brokerAccountId: latestAccount.id,
+    planActionId: action.id,
+    symbol: action.symbol,
+    side: action.action,
+    quantity,
+    orderType: 'simulated_market',
+    status: 'simulated_submitted',
+    brokerOrderId: `sim-${Date.now()}-${action.id}`,
+  });
+  orderRepo.markFilled(order.id, fillPrice);
+
+  const realizedPnl = positionRepo.applyFill({
+    userId,
+    brokerAccountId: latestAccount.id,
+    symbol: action.symbol,
+    side: action.action,
+    quantity,
+    fillPrice,
+  });
+  const nextCash = action.action === 'buy' ? currentCash - notional : currentCash + notional;
+  brokerAccountRepo.updateBalance(latestAccount.id, nextCash, nextCash, 'simulation');
+  pnlRepo.record({
+    userId,
+    brokerAccountId: latestAccount.id,
+    orderId: order.id,
+    realizedPnlUsd: realizedPnl,
+    balanceAfterUsd: nextCash,
+    note: `Simulated ${action.action} ${quantity} ${action.symbol} @ ${fillPrice}`,
+  });
+  glLedgerRepo.recordTrade({
+    userId,
+    brokerAccountId: latestAccount.id,
+    orderId: order.id,
+    planActionId: action.id,
+    symbol: action.symbol,
+    side: action.action,
+    quantity,
+    unitPrice: fillPrice,
+    sourceType: 'simulation',
+    memo: `Persistent simulation ${action.action} ${quantity} ${action.symbol} @ ${fillPrice}`,
+  });
+  return { status: `simulated_executed_${action.action}` };
 }
 
 function emit(onEvent, phase, progress, level, message, data) {

@@ -29,6 +29,7 @@ const positionRepo = require('../src/db/repositories/positionRepo');
 const orderRepo = require('../src/db/repositories/orderRepo');
 const pnlRepo = require('../src/db/repositories/pnlRepo');
 const glLedgerRepo = require('../src/db/repositories/glLedgerRepo');
+const brokerAccountRepo = require('../src/db/repositories/brokerAccountRepo');
 const researchRepo = require('../src/db/repositories/researchRepo');
 const decisionReportRepo = require('../src/db/repositories/decisionReportRepo');
 const MockBrokerClient = require('../src/services/broker/MockBrokerClient');
@@ -134,6 +135,113 @@ describe('runTradingCycle (mocked research + AI + broker)', () => {
     const [report] = decisionReportRepo.listByUser(simUser.id, 1);
     expect(report.mode).toBe('simulation');
     expect(report.summary.actions[0].evidence.momentum).toBe('bullish');
+  });
+
+  it('executes persistent Settings simulation as paper trades with positions, P&L, and GL entries', async () => {
+    const simUser = userRepo.createUser({
+      email: `cycle-persistent-sim-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+    settingsRepo.update(simUser.id, {
+      tradingEnabled: 0,
+      simulationModeEnabled: 1,
+      simulationStartingCashUsd: 150,
+    });
+    const account = require('../src/services/simulationModeService').startSimulation(simUser.id);
+    expect(account.simulation_mode_enabled).toBe(1);
+
+    const plan = await runTradingCycle({
+      userId: simUser.id,
+      broker: new MockBrokerClient({ startingCashUsd: 150 }),
+      runResearchCycle: stubRunResearchCycleFactory,
+      generatePlan: stubGeneratePlan,
+      executionMode: 'auto',
+    });
+
+    expect(plan.execution_mode).toBe('simulation');
+    expect(plan.actions.find((a) => a.symbol === 'NVDA').status).toBe('simulated_executed_buy');
+
+    const orders = orderRepo.listByUser(simUser.id, 10);
+    expect(orders).toHaveLength(1);
+    expect(orders[0].order_type).toBe('simulated_market');
+    expect(orders[0].status).toBe('filled');
+
+    const positions = positionRepo.listByUser(simUser.id);
+    expect(positions).toHaveLength(1);
+    expect(positions[0].symbol).toBe('NVDA');
+    expect(positions[0].quantity).toBe(1);
+
+    const pnl = pnlRepo.listByUser(simUser.id, 10);
+    expect(pnl[0].note).toContain('Simulated buy 1 NVDA');
+    expect(pnl[0].balance_after_usd).toBe(50);
+
+    const glEntries = glLedgerRepo.listByCompany(simUser.id, 'NVDA', 10);
+    expect(glEntries).toHaveLength(2);
+    expect(glEntries.every((entry) => entry.source_type === 'simulation')).toBe(true);
+    expect(glEntries.reduce((sum, entry) => sum + entry.debit, 0)).toBe(100);
+    expect(glEntries.reduce((sum, entry) => sum + entry.credit, 0)).toBe(100);
+  });
+
+  it('does not reset persistent simulation cash between manual cycles', async () => {
+    const simUser = userRepo.createUser({
+      email: `cycle-persistent-sim-cash-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+    settingsRepo.update(simUser.id, {
+      tradingEnabled: 0,
+      simulationModeEnabled: 1,
+      simulationStartingCashUsd: 100,
+    });
+    require('../src/services/simulationModeService').startSimulation(simUser.id);
+
+    const fordResearch = (_watchlist, { userId } = {}) =>
+      researchRepo.create({
+        userId,
+        source: 'stub',
+        summary: { watchlist: ['F'] },
+        signals: [
+          { symbol: 'F', price: 14, changePct: 1.4, volatilityPct: 1.2, momentum: 'bullish' },
+        ],
+      });
+    const fordPlan = async () => ({
+      modelUsed: 'stub:test-model',
+      raw: {
+        actions: [
+          { symbol: 'F', action: 'buy', quantity: 1, rationale: 'persistent simulation cash regression' },
+        ],
+        overallRationale: 'Buy Ford in simulation.',
+      },
+    });
+
+    await runTradingCycle({
+      userId: simUser.id,
+      broker: new MockBrokerClient({ startingCashUsd: 100 }),
+      runResearchCycle: fordResearch,
+      generatePlan: fordPlan,
+      executionMode: 'auto',
+    });
+    await runTradingCycle({
+      userId: simUser.id,
+      broker: new MockBrokerClient({ startingCashUsd: 100 }),
+      runResearchCycle: fordResearch,
+      generatePlan: fordPlan,
+      executionMode: 'auto',
+    });
+
+    const account = brokerAccountRepo.getDefault(simUser.id);
+    const [position] = positionRepo.listByUser(simUser.id);
+    const pnl = pnlRepo.listByUser(simUser.id, 10);
+
+    expect(position.symbol).toBe('F');
+    expect(position.quantity).toBe(2);
+    expect(position.avg_cost_usd).toBe(14);
+    expect(account.cash_balance_usd).toBe(72);
+    expect(pnl[0].balance_after_usd).toBe(72);
+    expect(pnl[1].balance_after_usd).toBe(86);
   });
 
   it('trips broker_connection_kill_switch and falls back to simulation when broker.getAccountState() throws', async () => {

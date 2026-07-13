@@ -10,17 +10,62 @@ const investorPlaybook = require('./investorPlaybookService');
 const jsonDatasetIndicators = require('./jsonDatasetIndicatorService');
 const companyDiscovery = require('./companyDiscoveryService');
 const chatResearch = require('./chatResearchService');
+const financialEventWeights = require('./financialEventWeightingService');
 const brainMesh = require('./brainMeshService');
+const watcherAgentService = require('./watcherAgentService');
+const crawleeCrawler = require('./crawleeResearchCrawlerService');
 const { config } = require('../config');
 const logger = require('../utils/logger');
 
 const DEFAULT_UNIVERSE = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'TSLA', 'AMD', 'META', 'SPY', 'QQQ'];
+const PRICE_TIER_BONUS_THRESHOLD = watcherAgentService.PRICE_TIER_THRESHOLD;
+const PRICE_TIER_BONUS_POINTS = 5;
+const WATCHER_SIGNAL_BONUS_POINTS = 4;
+const WATCHER_SIGNAL_MIN_AGREEING = 2;
+
+const MAX_WATCHER_SIGNALS_PER_USER = 40;
+const recentWatcherSignalsByUser = new Map();
+
+// watcher.research.reported is broadcast via tell() from every watcher's hourly
+// cycle; without this handler the top-level research agent showed "handlers":0
+// and the signal was logged but never fed back into the next scoring pass.
+brainMesh.registerHandler('agent.research.top-level', 'watcher.research.reported', (envelope) => {
+  const userId = envelope.ctx?.userId;
+  if (!userId || !envelope.body?.symbol) return { acknowledged: false };
+  const list = recentWatcherSignalsByUser.get(userId) || [];
+  list.push({
+    symbol: envelope.body.symbol,
+    predictedAction: envelope.body.predictedAction,
+    localAiScore: envelope.body.localAiScore,
+    receivedAt: new Date().toISOString(),
+  });
+  recentWatcherSignalsByUser.set(userId, list.slice(-MAX_WATCHER_SIGNALS_PER_USER));
+  return { acknowledged: true };
+});
+
+function listRecentWatcherSignals(userId, symbol) {
+  const signals = recentWatcherSignalsByUser.get(userId) || [];
+  return symbol ? signals.filter((signal) => signal.symbol === symbol) : signals;
+}
 
 const NEWS_FEEDS = [
   { name: 'Yahoo Finance', region: 'US markets', url: 'https://finance.yahoo.com/news/rssindex' },
   { name: 'CNBC Economy', region: 'US economy', url: 'https://www.cnbc.com/id/20910258/device/rss/rss.html' },
   { name: 'BBC Business', region: 'world business', url: 'https://feeds.bbci.co.uk/news/business/rss.xml' },
   { name: 'Google News World Business', region: 'world news', url: 'https://news.google.com/rss/search?q=world+economy+markets&hl=en-US&gl=US&ceid=US:en' },
+  { name: 'MarketWatch Pulse', region: 'US markets', url: 'https://feeds.content.dowjones.io/public/rss/mw_marketpulse' },
+  { name: 'MarketWatch Top Stories', region: 'US markets', url: 'https://feeds.content.dowjones.io/public/rss/mw_topstories' },
+  { name: 'MarketWatch Bulletins', region: 'US markets', url: 'https://feeds.content.dowjones.io/public/rss/mw_bulletins' },
+  { name: 'MarketWatch Realtime Headlines', region: 'US markets', url: 'https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines' },
+  { name: 'CNBC Finance', region: 'US markets', url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114' },
+  { name: 'CNBC Economy (search feed)', region: 'US economy', url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=19854910' },
+  { name: 'CNBC Earnings', region: 'US markets', url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100727362' },
+  { name: 'CNBC Business', region: 'US business', url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=19836768' },
+  { name: 'CNBC Top News', region: 'US markets', url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000116' },
+  { name: 'WSJ Markets Main', region: 'US markets', url: 'https://feeds.content.dowjones.io/public/rss/RSSMarketsMain' },
+  { name: 'WSJ US Business', region: 'US business', url: 'https://feeds.content.dowjones.io/public/rss/WSJcomUSBusiness' },
+  { name: 'Federal Reserve Press Releases', region: 'US monetary policy', url: 'https://www.federalreserve.gov/feeds/press_all.xml' },
+  { name: 'CNBC Markets', region: 'US markets', url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10001147' },
 ];
 
 const THEMES = [
@@ -78,6 +123,24 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
     userId,
     researchRunId,
   });
+
+  const valuableArticles = selectValuableArticles(news.items);
+  if (valuableArticles.length) {
+    emit(onEvent, 'crawlee-article-deep-crawl', 12, 'info', 'Following headline links of valuable articles for deeper research leads.', {
+      articles: valuableArticles.map((article) => ({ title: article.title, url: article.link })),
+    });
+  }
+  const deepCrawlResults = await Promise.allSettled(
+    valuableArticles.map((article) => crawleeCrawler.crawlFromArticle({ article, onEvent }))
+  );
+  learned.entityLeads = learned.entityLeads || [];
+  for (const result of deepCrawlResults) {
+    if (result.status !== 'fulfilled') continue;
+    learned.observations.push(
+      ...result.value.pages.map((page) => ({ title: page.title, excerpt: page.excerpt, url: page.url }))
+    );
+    learned.entityLeads.push(...result.value.entityLeads);
+  }
 
   const crawledDiscoveredCompanies = companyDiscovery.discoverCompanies({ news, learned, maxCandidates: 36 });
   const entityExpandedCompanies = await expandEntityLeadsWithFinnhub({
@@ -168,10 +231,26 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
     macro,
     consumer,
     quotes,
+    news,
+    learned,
     onEvent,
   });
   const investorPlaybookSummary = investorPlaybook.getPlaybookSummary();
   const scored = scoreCandidates({ userId, candidates: prePlan.candidates, quotes, news, macro, consumer, learned, companyIntel, jsonDatasets, onEvent });
+
+  for (const signal of scored) {
+    try {
+      const candidate = prePlan.candidates.find((c) => c.symbol === signal.symbol);
+      watcherAgentService.ensureWatcherAgent(userId, {
+        symbol: signal.symbol,
+        companyName: candidate?.companyName,
+        price: signal.price,
+      });
+    } catch (error) {
+      logger.warn('Failed to ensure watcher agent for symbol', { symbol: signal.symbol, error: error.message });
+    }
+  }
+
   meshTell({
     conversation: meshConversation,
     from: 'brain.model.neural',
@@ -602,6 +681,7 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
     const macroRisk = macro.riskBias === 'risk-off' ? 0.75 : macro.riskBias === 'risk-on' ? 0.2 : 0.45;
     const consumerStrength = consumer.consumerBias === 'constructive' ? 0.65 : 0.45;
     const factorIntel = companyIntelligence.factorScoreForSymbol(intelBySymbol.get(candidate.symbol));
+    const historicalWatchFactors = factorIntel.historicalWatchFactors || [];
     const playbookIntel = investorPlaybook.scoreCandidate({
       candidate,
       quote,
@@ -618,6 +698,12 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
       companyRecord: intelBySymbol.get(candidate.symbol),
       datasetContext: jsonDatasets,
     });
+    const eventWeightIntel = financialEventWeights.scoreCandidateEvidence({
+      candidate,
+      news,
+      learned,
+      chatResearch: candidate.chatResearch,
+    });
     const input = {
       momentum: clamp01((changePct + 8) / 16),
       volatility: clamp01(volatilityPct / 8),
@@ -626,8 +712,10 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
       macroRisk,
       consumer: consumerStrength,
       brokerFactors: factorIntel.normalized,
+      historicalWatchFactors: factorIntel.historicalWatchNormalized ?? 0.5,
       investorPlaybook: playbookIntel.normalized,
       jsonDatasets: datasetIntel.normalized,
+      financialEvents: eventWeightIntel.normalized,
     };
     const output = net.run(input);
     const brainNetScore01 = clamp01(output.score || output[0] || 0);
@@ -637,7 +725,21 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
       brainNetScore01,
       trainingData: CANDIDATE_SCORER_TRAINING_DATA,
     });
-    const localAiScore = Number((ensemble.combined * 100).toFixed(1));
+    const eventScoreAdjustment = clamp(eventWeightIntel.aggregateScore * 2.2, -18, 18);
+    const baseLocalAiScore = Number(clamp(ensemble.combined * 100 + eventScoreAdjustment, 0, 100).toFixed(1));
+    const priceTierBonusApplied = quote.current > 0 && quote.current < PRICE_TIER_BONUS_THRESHOLD;
+    const priceTierAdjustedScore = priceTierBonusApplied
+      ? Number(Math.min(100, baseLocalAiScore + PRICE_TIER_BONUS_POINTS).toFixed(1))
+      : baseLocalAiScore;
+    const watcherSignals = listRecentWatcherSignals(userId, candidate.symbol);
+    const watcherBullish = watcherSignals.filter((signal) => signal.predictedAction === 'buy-candidate').length;
+    const watcherBearish = watcherSignals.filter((signal) => signal.predictedAction === 'sell-or-avoid').length;
+    const watcherSignalAdjustment = watcherBullish >= WATCHER_SIGNAL_MIN_AGREEING
+      ? WATCHER_SIGNAL_BONUS_POINTS
+      : watcherBearish >= WATCHER_SIGNAL_MIN_AGREEING
+        ? -WATCHER_SIGNAL_BONUS_POINTS
+        : 0;
+    const localAiScore = Number(clamp(priceTierAdjustedScore + watcherSignalAdjustment, 0, 100).toFixed(1));
     const actionBias = localAiScore >= 66 && changePct > -2 ? 'buy-candidate' : localAiScore <= 36 ? 'sell-or-avoid' : 'hold-watch';
     scored.push({
       symbol: candidate.symbol,
@@ -647,6 +749,8 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
       momentum: changePct > 1 ? 'bullish' : changePct < -1 ? 'bearish' : 'neutral',
       actionBias,
       localAiScore,
+      baseLocalAiScore,
+      priceTierBonusApplied,
       ensembleMemberScores: ensemble.memberScores,
       theme: candidate.theme,
       themeHits: candidate.themeHits,
@@ -658,6 +762,7 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
       brokerFactorScore: factorIntel.compositeScore,
       investorPlaybookScore: playbookIntel.compositeScore,
       jsonDatasetScore: datasetIntel.compositeScore,
+      financialEventScore: eventWeightIntel.aggregateScore,
       brainModelKey: record.model_key,
       evidence: {
         quote: {
@@ -671,6 +776,8 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
         explanation: [
           `Momentum ${changePct}%`,
           `Volatility range ${volatilityPct}%`,
+          ...(priceTierBonusApplied ? [`sub_20_priority_bonus: +${PRICE_TIER_BONUS_POINTS} pts for price under $${PRICE_TIER_BONUS_THRESHOLD} (base score ${baseLocalAiScore})`] : []),
+          ...(watcherSignalAdjustment !== 0 ? [`watcher_agent_signal: ${watcherSignalAdjustment > 0 ? '+' : ''}${watcherSignalAdjustment} pts from ${watcherBullish} bullish / ${watcherBearish} bearish recent watcher reports`] : []),
           `News and learned-source sentiment score ${sentiment}`,
           `Theme ${candidate.theme} with ${candidate.themeHits || 0} hits`,
           ...(candidate.discovery?.evidence?.slice(0, 2).map((item) => `Crawled discovery: ${item.reason}`) || []),
@@ -678,9 +785,16 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
           `Macro bias ${macro.riskBias}`,
           `Consumer bias ${consumer.consumerBias}`,
           `Broker factor intelligence ${factorIntel.compositeScore}`,
+          ...historicalWatchFactors.map((factor) => (
+            `${factor.label} ${factor.score}: ${factor.stance}`
+          )),
           `Investor playbook score ${playbookIntel.compositeScore}`,
           `Public JSON dataset score ${datasetIntel.compositeScore}`,
+          `WEIGHT.md event score ${eventWeightIntel.aggregateScore} (${eventWeightIntel.topEvents.length} weighted events)`,
           ...datasetIntel.explanations,
+          ...eventWeightIntel.topEvents.slice(0, 4).map((event) => (
+            `Weighted ${event.event.direction} ${event.event.category}: ${event.event.type} => ${event.final_event_score}`
+          )),
           ...playbookIntel.indicators.slice(0, 3).map((indicator) => `${indicator.indicator} ${indicator.score}: ${indicator.interpretation}`),
           ...factorIntel.explanations.slice(0, 4),
         ],
@@ -699,8 +813,17 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
           compositeRiskScore: jsonDatasets?.compositeRiskScore,
           opportunityScore: jsonDatasets?.opportunityScore,
         },
+        financialEvents: {
+          model: eventWeightIntel.model,
+          aggregateScore: eventWeightIntel.aggregateScore,
+          normalized: eventWeightIntel.normalized,
+          categoryImpacts: eventWeightIntel.categoryImpacts,
+          topEvents: eventWeightIntel.topEvents,
+          note: 'WEIGHT.md event scores update assumptions and ranking features; they do not directly authorize buy/sell orders.',
+        },
         discovery: candidate.discovery || null,
         chatResearch: candidate.chatResearch || null,
+        historicalWatchFactors,
       },
     });
   }
@@ -721,25 +844,25 @@ function scoreCandidates({ userId, candidates, quotes, news, macro, consumer, le
 // regression ensemble member, so they're two independently-fit models over
 // the same labeled feature space rather than one model wearing two hats.
 const CANDIDATE_SCORER_TRAINING_DATA = [
-  { input: { momentum: 0.9, volatility: 0.25, news: 0.85, theme: 0.8, macroRisk: 0.15, consumer: 0.8, brokerFactors: 0.9, investorPlaybook: 0.9, jsonDatasets: 0.85 }, output: { score: 0.95 } },
-  { input: { momentum: 0.75, volatility: 0.35, news: 0.65, theme: 0.55, macroRisk: 0.35, consumer: 0.6, brokerFactors: 0.75, investorPlaybook: 0.78, jsonDatasets: 0.72 }, output: { score: 0.78 } },
-  { input: { momentum: 0.55, volatility: 0.45, news: 0.5, theme: 0.35, macroRisk: 0.45, consumer: 0.5, brokerFactors: 0.55, investorPlaybook: 0.55, jsonDatasets: 0.5 }, output: { score: 0.52 } },
-  { input: { momentum: 0.25, volatility: 0.8, news: 0.25, theme: 0.2, macroRisk: 0.75, consumer: 0.35, brokerFactors: 0.25, investorPlaybook: 0.24, jsonDatasets: 0.22 }, output: { score: 0.13 } },
-  { input: { momentum: 0.75, volatility: 0.9, news: 0.4, theme: 0.4, macroRisk: 0.8, consumer: 0.4, brokerFactors: 0.35, investorPlaybook: 0.34, jsonDatasets: 0.3 }, output: { score: 0.27 } },
-  { input: { momentum: 0.35, volatility: 0.2, news: 0.7, theme: 0.65, macroRisk: 0.25, consumer: 0.75, brokerFactors: 0.7, investorPlaybook: 0.74, jsonDatasets: 0.76 }, output: { score: 0.68 } },
-  { input: { momentum: 0.65, volatility: 0.3, news: 0.45, theme: 0.35, macroRisk: 0.4, consumer: 0.45, brokerFactors: 0.85, investorPlaybook: 0.82, jsonDatasets: 0.7 }, output: { score: 0.72 } },
+  { input: { momentum: 0.9, volatility: 0.25, news: 0.85, theme: 0.8, macroRisk: 0.15, consumer: 0.8, brokerFactors: 0.9, historicalWatchFactors: 0.88, investorPlaybook: 0.9, jsonDatasets: 0.85, financialEvents: 0.92 }, output: { score: 0.95 } },
+  { input: { momentum: 0.75, volatility: 0.35, news: 0.65, theme: 0.55, macroRisk: 0.35, consumer: 0.6, brokerFactors: 0.75, historicalWatchFactors: 0.72, investorPlaybook: 0.78, jsonDatasets: 0.72, financialEvents: 0.72 }, output: { score: 0.78 } },
+  { input: { momentum: 0.55, volatility: 0.45, news: 0.5, theme: 0.35, macroRisk: 0.45, consumer: 0.5, brokerFactors: 0.55, historicalWatchFactors: 0.52, investorPlaybook: 0.55, jsonDatasets: 0.5, financialEvents: 0.5 }, output: { score: 0.52 } },
+  { input: { momentum: 0.25, volatility: 0.8, news: 0.25, theme: 0.2, macroRisk: 0.75, consumer: 0.35, brokerFactors: 0.25, historicalWatchFactors: 0.2, investorPlaybook: 0.24, jsonDatasets: 0.22, financialEvents: 0.18 }, output: { score: 0.13 } },
+  { input: { momentum: 0.75, volatility: 0.9, news: 0.4, theme: 0.4, macroRisk: 0.8, consumer: 0.4, brokerFactors: 0.35, historicalWatchFactors: 0.32, investorPlaybook: 0.34, jsonDatasets: 0.3, financialEvents: 0.28 }, output: { score: 0.27 } },
+  { input: { momentum: 0.35, volatility: 0.2, news: 0.7, theme: 0.65, macroRisk: 0.25, consumer: 0.75, brokerFactors: 0.7, historicalWatchFactors: 0.68, investorPlaybook: 0.74, jsonDatasets: 0.76, financialEvents: 0.76 }, output: { score: 0.68 } },
+  { input: { momentum: 0.65, volatility: 0.3, news: 0.45, theme: 0.35, macroRisk: 0.4, consumer: 0.45, brokerFactors: 0.85, historicalWatchFactors: 0.8, investorPlaybook: 0.82, jsonDatasets: 0.7, financialEvents: 0.68 }, output: { score: 0.72 } },
 ];
 
 function buildBrainScorer(userId) {
   return brainModelService.loadOrTrain({
     userId,
-    modelKey: 'candidate-factor-scorer-v4-json-datasets',
-    hiddenLayers: [9, 6],
+    modelKey: 'candidate-factor-scorer-v6-history-watch-factors',
+    hiddenLayers: [10, 6],
     iterations: 100,
     metadata: {
-      purpose: 'Scores trade candidates using market signals, broker-style factor intelligence, high-earning investor playbooks, and public JSON dataset context.',
+      purpose: 'Scores trade candidates using market signals, broker-style factor intelligence, historical watch factors, high-earning investor playbooks, public JSON dataset context, and WEIGHT.md financial-event multipliers.',
       exportedFormat: 'brain.js toJSON',
-      inputFeatures: ['momentum', 'volatility', 'news', 'theme', 'macroRisk', 'consumer', 'brokerFactors', 'investorPlaybook', 'jsonDatasets'],
+      inputFeatures: ['momentum', 'volatility', 'news', 'theme', 'macroRisk', 'consumer', 'brokerFactors', 'historicalWatchFactors', 'investorPlaybook', 'jsonDatasets', 'financialEvents'],
     },
     trainingData: CANDIDATE_SCORER_TRAINING_DATA,
   });
@@ -748,7 +871,7 @@ function buildBrainScorer(userId) {
 function buildResearchNarrative({ scored, news, macro, consumer, learned, investorPlaybookSummary, jsonDatasets }) {
   const leaders = scored.slice(0, 3).map((s) => `${s.symbol} (${s.localAiScore})`).join(', ') || 'none';
   return {
-    summary: `Autonomous scan ranked ${leaders} highest after blending news, learned web sources, macro, consumer-sales, quote momentum, company factors, investor playbook indicators, and public JSON dataset signals.`,
+    summary: `Autonomous scan ranked ${leaders} highest after blending news, learned web sources, macro, consumer-sales, quote momentum, company factors, historical growth/value/split watch factors, investor playbook indicators, public JSON dataset signals, and WEIGHT.md event multipliers.`,
     newsItemCount: news.items.length,
     learnedSourceCount: learned.learnedSources.length,
     learnedObservationCount: learned.observations.length,
@@ -760,6 +883,8 @@ function buildResearchNarrative({ scored, news, macro, consumer, learned, invest
       symbol: s.symbol,
       score: s.localAiScore,
       bias: s.actionBias,
+      financialEventScore: s.financialEventScore,
+      historicalWatchFactors: s.evidence.historicalWatchFactors,
       reasons: s.evidence.explanation,
     })),
   };
@@ -773,6 +898,23 @@ function sentimentFor(candidate, text) {
   const positive = POSITIVE_TERMS.reduce((count, term) => count + occurrences(scope, term), 0);
   const negative = NEGATIVE_TERMS.reduce((count, term) => count + occurrences(scope, term), 0);
   return Math.max(-4, Math.min(4, positive - negative));
+}
+
+function selectValuableArticles(newsItems, { maxArticles = 6 } = {}) {
+  return (newsItems || [])
+    .filter((item) => item && item.link)
+    .map((item) => {
+      const text = `${item.title || ''} ${item.description || ''}`.toLowerCase();
+      const themeHits = THEMES.reduce((count, theme) => count + theme.terms.reduce((c, term) => c + occurrences(text, term), 0), 0);
+      const positive = POSITIVE_TERMS.reduce((count, term) => count + occurrences(text, term), 0);
+      const negative = NEGATIVE_TERMS.reduce((count, term) => count + occurrences(text, term), 0);
+      const score = themeHits * 2 + positive + negative;
+      return { item, score };
+    })
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, maxArticles)
+    .map(({ item }) => item);
 }
 
 function inferMacroRisk(indicators) {
@@ -846,8 +988,12 @@ function occurrences(haystack, needle) {
   return haystack.split(needle.toLowerCase()).length - 1;
 }
 
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, Number(value) || 0));
+}
+
 function clamp01(value) {
-  return Math.max(0, Math.min(1, Number(value) || 0));
+  return clamp(value, 0, 1);
 }
 
 function emit(onEvent, phase, progress, level, message, data) {
@@ -877,4 +1023,8 @@ module.exports = {
   DEFAULT_UNIVERSE,
   buildPrePlan,
   scoreCandidates,
+  collectQuotes,
+  NEWS_FEEDS,
+  selectValuableArticles,
+  listRecentWatcherSignals,
 };

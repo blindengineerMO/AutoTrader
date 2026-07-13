@@ -48,6 +48,17 @@ const PROVIDERS = [
     envConfigured: () => Boolean(config.groqApiKey),
   },
   {
+    providerType: 'ai',
+    providerKey: 'ollama',
+    displayName: 'Ollama (local)',
+    description: 'Local, OpenAI-compatible LLM used as a free strategy/learning fallback when no hosted provider is configured.',
+    fields: [
+      { key: 'baseUrl', label: 'Base URL', secret: false, placeholder: config.ollamaBaseUrl },
+      { key: 'model', label: 'Model', secret: false, placeholder: config.ollamaModel },
+    ],
+    envConfigured: () => Boolean(config.ollamaBaseUrl),
+  },
+  {
     providerType: 'chat-research',
     providerKey: 'xai-grok',
     displayName: 'xAI Grok',
@@ -87,6 +98,38 @@ const PROVIDERS = [
     description: 'Optional market data provider; web scraping is used when this is unavailable.',
     fields: [{ key: 'apiKey', label: 'API key', secret: true }],
     envConfigured: () => Boolean(config.finnhubApiKey),
+  },
+  {
+    providerType: 'data-source',
+    providerKey: 'openalex',
+    displayName: 'OpenAlex',
+    description: 'Free scholarly/technology signal API for papers, institutions, topics, funders, and semantic search.',
+    fields: [{ key: 'apiKey', label: 'Free API key', secret: true }],
+    envConfigured: () => Boolean(config.openAlexApiKey),
+  },
+  {
+    providerType: 'data-source',
+    providerKey: 'openfda',
+    displayName: 'openFDA',
+    description: 'Free FDA drug, device, food, recall, adverse-event, label, and historical-document API.',
+    fields: [{ key: 'apiKey', label: 'Free API key', secret: true }],
+    envConfigured: () => Boolean(config.openFdaApiKey),
+  },
+  {
+    providerType: 'data-source',
+    providerKey: 'reliefweb',
+    displayName: 'ReliefWeb',
+    description: 'Free humanitarian disaster/conflict report API; requests should include an application name.',
+    fields: [{ key: 'appName', label: 'Application name', secret: false, placeholder: config.reliefWebAppName || 'autotrader-research' }],
+    envConfigured: () => Boolean(config.reliefWebAppName),
+  },
+  {
+    providerType: 'data-source',
+    providerKey: 'nws-weather',
+    displayName: 'NOAA/NWS Weather',
+    description: 'Free National Weather Service forecasts, observations, and alerts; official requests require a User-Agent.',
+    fields: [{ key: 'userAgent', label: 'User-Agent / contact', secret: false, placeholder: config.nwsUserAgent || '(app.example.com, contact@example.com)' }],
+    envConfigured: () => Boolean(config.nwsUserAgent),
   },
 ];
 

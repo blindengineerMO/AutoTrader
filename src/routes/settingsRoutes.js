@@ -6,6 +6,8 @@ const rulesEngine = require('../services/rulesEngine');
 const providerConfigService = require('../services/providerConfigService');
 const sourceLearning = require('../services/researchSourceLearningService');
 const scheduler = require('../jobs/scheduler');
+const simulationModeService = require('../services/simulationModeService');
+const timeSettings = require('../services/timeSettingsService');
 
 const router = express.Router();
 
@@ -16,6 +18,24 @@ const settingsPatchSchema = z.object({
   evaluationCadenceCron: z.string().optional(),
   sourceLearningEnabled: z.boolean().optional(),
   tradingEnabled: z.boolean().optional(),
+  watcherCycleCadenceCron: z.string().optional(),
+  watcherGradingCadenceCron: z.string().optional(),
+  applicationTimezone: z.string().refine(timeSettings.isValidTimeZone, 'Invalid timezone').optional(),
+  tradingStartTime: z.string().refine(timeSettings.isValidTime, 'Trading start time must be HH:mm').optional(),
+  tradingEndTime: z.string().refine(timeSettings.isValidTime, 'Trading end time must be HH:mm').optional(),
+  simulationModeEnabled: z.boolean().optional(),
+  simulationStartingCashUsd: z.number().positive().max(100000000).optional(),
+  agentPersonalityRefreshEnabled: z.boolean().optional(),
+  agentPersonalityRefreshTime: z.string().refine(timeSettings.isValidTime, 'Agent refresh time must be HH:mm').optional(),
+  personalityTickCadenceCron: z.string().optional(),
+  agentLocalLearningEnabled: z.boolean().optional(),
+  dashboardLayout: z.record(z.array(z.object({
+    i: z.string(),
+    x: z.number(),
+    y: z.number(),
+    w: z.number(),
+    h: z.number(),
+  }))).optional(),
 });
 
 const sourceSchema = z.object({
@@ -88,13 +108,26 @@ router.put('/providers/:providerKey', (req, res) => {
 router.patch('/', (req, res) => {
   const parsed = settingsPatchSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid input' });
+  const before = settingsRepo.get(req.user.id);
   const patch = { ...parsed.data };
   if (patch.tradingEnabled !== undefined) patch.tradingEnabled = patch.tradingEnabled ? 1 : 0;
   if (patch.sourceLearningEnabled !== undefined) patch.sourceLearningEnabled = patch.sourceLearningEnabled ? 1 : 0;
+  if (patch.simulationModeEnabled !== undefined) patch.simulationModeEnabled = patch.simulationModeEnabled ? 1 : 0;
+  if (patch.agentPersonalityRefreshEnabled !== undefined) patch.agentPersonalityRefreshEnabled = patch.agentPersonalityRefreshEnabled ? 1 : 0;
+  if (patch.agentLocalLearningEnabled !== undefined) patch.agentLocalLearningEnabled = patch.agentLocalLearningEnabled ? 1 : 0;
+  if (patch.dashboardLayout !== undefined) {
+    patch.dashboardLayoutJson = JSON.stringify(patch.dashboardLayout);
+    delete patch.dashboardLayout;
+  }
   const updated = settingsRepo.update(req.user.id, patch);
-  scheduler.scheduleForUser(req.user.id, updated.research_cadence_cron);
-  scheduler.scheduleEvaluationForUser(req.user.id, updated.evaluation_cadence_cron || '0 0 * * *');
-  res.json(updated);
+  let finalSettings = updated;
+  if (patch.simulationModeEnabled === 1 && !before?.simulation_mode_enabled) {
+    finalSettings = simulationModeService.startSimulation(req.user.id, updated);
+  } else if (patch.simulationModeEnabled === 0 && before?.simulation_mode_enabled) {
+    finalSettings = simulationModeService.stopSimulation(req.user.id);
+  }
+  scheduler.scheduleUserAutomation(req.user.id, finalSettings);
+  res.json(finalSettings);
 });
 
 router.post('/kill-switch/engage', (req, res) => {

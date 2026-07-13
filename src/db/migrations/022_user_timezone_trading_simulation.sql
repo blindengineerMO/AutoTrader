@@ -1,0 +1,12 @@
+ALTER TABLE user_settings ADD COLUMN application_timezone TEXT NOT NULL DEFAULT 'America/New_York';
+ALTER TABLE user_settings ADD COLUMN trading_start_time TEXT NOT NULL DEFAULT '09:30';
+ALTER TABLE user_settings ADD COLUMN trading_end_time TEXT NOT NULL DEFAULT '16:00';
+ALTER TABLE user_settings ADD COLUMN simulation_mode_enabled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE user_settings ADD COLUMN simulation_starting_cash_usd REAL NOT NULL DEFAULT 100;
+ALTER TABLE user_settings ADD COLUMN simulation_started_at TEXT;
+ALTER TABLE user_settings ADD COLUMN simulation_stopped_at TEXT;
+ALTER TABLE user_settings ADD COLUMN simulation_last_cycle_at TEXT;
+ALTER TABLE user_settings ADD COLUMN simulation_last_evaluation_at TEXT;
+ALTER TABLE user_settings ADD COLUMN agent_personality_refresh_enabled INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE user_settings ADD COLUMN agent_personality_refresh_time TEXT NOT NULL DEFAULT '20:00';
+ALTER TABLE user_settings ADD COLUMN agent_personality_last_refreshed_at TEXT;

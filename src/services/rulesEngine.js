@@ -43,10 +43,14 @@ function checkTradeAllowed({ userId, symbol, side, estimatedUsd }) {
 
   const todaysPnl = pnlRepo.sumSince(userId, startOfTodayUtc());
   if (todaysPnl <= -Math.abs(settings.daily_loss_limit_usd)) {
-    return {
-      allowed: false,
-      reason: `Daily loss limit reached ($${todaysPnl.toFixed(2)} vs limit $${settings.daily_loss_limit_usd})`,
-    };
+    const reason = `Daily loss limit reached ($${todaysPnl.toFixed(2)} vs limit $${settings.daily_loss_limit_usd})`;
+    // Latches like the other six auto kill switches: once tripped, stays
+    // engaged (including into the next trading day) until an operator
+    // explicitly calls clearAutoKillSwitch, rather than silently clearing
+    // itself the moment today's running P&L ticks back above the limit.
+    settingsRepo.engageAutoKillSwitch(userId, 'daily_loss_limit_kill_switch', reason);
+    alertingService.alertKillSwitch({ userId, switchName: 'daily_loss_limit_kill_switch', reason });
+    return { allowed: false, reason };
   }
 
   if (side === 'deposit' || side === 'transfer_in') {

@@ -374,6 +374,7 @@
             <span class="font-headline">{{ action.symbol }}</span>
             <span class="min-w-0">
               <span class="block text-white/70">{{ evidenceLine(action) }}</span>
+              <small v-if="historicalWatchLine(action)" class="block text-accent/70">{{ historicalWatchLine(action) }}</small>
               <small class="block text-white/38">{{ action.rationale }}</small>
               <small v-if="action.evidence?.discovery" class="block text-accent/70">{{ action.evidence.discovery.evidence?.[0]?.reason }}</small>
             </span>
@@ -687,6 +688,18 @@ function evidenceLine(action) {
   const change = evidence.changePct >= 0 ? `+${evidence.changePct}` : evidence.changePct;
   const score = evidence.localAiScore ? ` · score ${evidence.localAiScore}` : '';
   return `$${fmt(evidence.price)} · ${change}% · ${evidence.volatilityPct}% range · ${evidence.momentum}${score}`;
+}
+
+function historicalWatchLine(action) {
+  const factors = action.evidence?.historicalWatchFactors || [];
+  if (!factors.length) return '';
+  return factors
+    .slice(0, 3)
+    .map((factor) => {
+      if (factor.key === 'fiveYearSplitActivity') return `${factor.label}: ${factor.stockSplitsPast5Years || 0}`;
+      return `${factor.label}: ${factor.score}`;
+    })
+    .join(' · ');
 }
 
 function fmt(value) {

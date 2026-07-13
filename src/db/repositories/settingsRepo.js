@@ -10,11 +10,49 @@ const updateStmt = db.prepare(`
       evaluation_cadence_cron = @evaluationCadenceCron,
       source_learning_enabled = @sourceLearningEnabled,
       trading_enabled = @tradingEnabled,
+      watcher_cycle_cadence_cron = @watcherCycleCadenceCron,
+      watcher_grading_cadence_cron = @watcherGradingCadenceCron,
+      application_timezone = @applicationTimezone,
+      trading_start_time = @tradingStartTime,
+      trading_end_time = @tradingEndTime,
+      simulation_mode_enabled = @simulationModeEnabled,
+      simulation_starting_cash_usd = @simulationStartingCashUsd,
+      agent_personality_refresh_enabled = @agentPersonalityRefreshEnabled,
+      agent_personality_refresh_time = @agentPersonalityRefreshTime,
+      personality_tick_cadence_cron = @personalityTickCadenceCron,
+      agent_local_learning_enabled = @agentLocalLearningEnabled,
+      dashboard_layout_json = @dashboardLayoutJson,
       updated_at = datetime('now')
   WHERE user_id = @userId
 `);
 const insertKillSwitchEvent = db.prepare(`
   INSERT INTO kill_switch_events (user_id, engaged, triggered_by, reason) VALUES (?, ?, ?, ?)
+`);
+const markSimulationStartedStmt = db.prepare(`
+  UPDATE user_settings
+  SET simulation_mode_enabled = 1,
+      simulation_started_at = datetime('now'),
+      simulation_stopped_at = NULL,
+      simulation_last_cycle_at = NULL,
+      simulation_last_evaluation_at = NULL,
+      updated_at = datetime('now')
+  WHERE user_id = ?
+`);
+const markSimulationStoppedStmt = db.prepare(`
+  UPDATE user_settings
+  SET simulation_mode_enabled = 0,
+      simulation_stopped_at = datetime('now'),
+      updated_at = datetime('now')
+  WHERE user_id = ?
+`);
+const markSimulationCycleStmt = db.prepare(`
+  UPDATE user_settings SET simulation_last_cycle_at = datetime('now'), updated_at = datetime('now') WHERE user_id = ?
+`);
+const markSimulationEvaluationStmt = db.prepare(`
+  UPDATE user_settings SET simulation_last_evaluation_at = datetime('now'), updated_at = datetime('now') WHERE user_id = ?
+`);
+const markAgentRefreshStmt = db.prepare(`
+  UPDATE user_settings SET agent_personality_last_refreshed_at = datetime('now'), updated_at = datetime('now') WHERE user_id = ?
 `);
 
 // Auto-tripped switches, each independent of the manual kill_switch_engaged
@@ -25,6 +63,7 @@ const AUTO_KILL_SWITCHES = [
   'market_data_kill_switch',
   'reconciliation_failure_kill_switch',
   'automatic_strategy_kill_switch',
+  'daily_loss_limit_kill_switch',
 ];
 
 function get(userId) {
@@ -83,6 +122,18 @@ function update(userId, patch) {
     evaluationCadenceCron: patch.evaluationCadenceCron ?? current.evaluation_cadence_cron,
     sourceLearningEnabled: patch.sourceLearningEnabled ?? current.source_learning_enabled,
     tradingEnabled: patch.tradingEnabled ?? current.trading_enabled,
+    watcherCycleCadenceCron: patch.watcherCycleCadenceCron ?? current.watcher_cycle_cadence_cron,
+    watcherGradingCadenceCron: patch.watcherGradingCadenceCron ?? current.watcher_grading_cadence_cron,
+    applicationTimezone: patch.applicationTimezone ?? current.application_timezone,
+    tradingStartTime: patch.tradingStartTime ?? current.trading_start_time,
+    tradingEndTime: patch.tradingEndTime ?? current.trading_end_time,
+    simulationModeEnabled: patch.simulationModeEnabled ?? current.simulation_mode_enabled,
+    simulationStartingCashUsd: patch.simulationStartingCashUsd ?? current.simulation_starting_cash_usd,
+    agentPersonalityRefreshEnabled: patch.agentPersonalityRefreshEnabled ?? current.agent_personality_refresh_enabled,
+    agentPersonalityRefreshTime: patch.agentPersonalityRefreshTime ?? current.agent_personality_refresh_time,
+    personalityTickCadenceCron: patch.personalityTickCadenceCron ?? current.personality_tick_cadence_cron,
+    agentLocalLearningEnabled: patch.agentLocalLearningEnabled ?? current.agent_local_learning_enabled,
+    dashboardLayoutJson: patch.dashboardLayoutJson ?? current.dashboard_layout_json,
   };
   updateStmt.run(merged);
   return get(userId);
@@ -105,4 +156,24 @@ module.exports = {
   engageAutoKillSwitch,
   clearAutoKillSwitch,
   isAnyKillSwitchEngaged,
+  markSimulationStarted: (userId) => {
+    markSimulationStartedStmt.run(userId);
+    return get(userId);
+  },
+  markSimulationStopped: (userId) => {
+    markSimulationStoppedStmt.run(userId);
+    return get(userId);
+  },
+  markSimulationCycle: (userId) => {
+    markSimulationCycleStmt.run(userId);
+    return get(userId);
+  },
+  markSimulationEvaluation: (userId) => {
+    markSimulationEvaluationStmt.run(userId);
+    return get(userId);
+  },
+  markAgentPersonalityRefreshed: (userId) => {
+    markAgentRefreshStmt.run(userId);
+    return get(userId);
+  },
 };

@@ -32,4 +32,36 @@ describe('providerConfigService', () => {
     expect(stored.apiKey).toBe('sk-test-secret');
     expect(stored.model).toBe('gpt-4o-mini');
   });
+
+  it('exposes optional free data-source credentials in settings providers', () => {
+    const user = userRepo.createUser({
+      email: `data-source-provider-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+
+    const providers = providerConfigService.listProviders(user.id);
+    const keys = providers.map((provider) => provider.providerKey);
+
+    expect(keys).toEqual(expect.arrayContaining(['openalex', 'openfda', 'reliefweb', 'nws-weather']));
+    expect(providers.find((provider) => provider.providerKey === 'reliefweb').fields[0].key).toBe('appName');
+    expect(providers.find((provider) => provider.providerKey === 'nws-weather').fields[0].key).toBe('userAgent');
+  });
+
+  it('lists the local Ollama provider as env-configured by default (no API key required)', () => {
+    const user = userRepo.createUser({
+      email: `ollama-provider-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+
+    const providers = providerConfigService.listProviders(user.id);
+    const ollama = providers.find((provider) => provider.providerKey === 'ollama');
+    expect(ollama).toBeDefined();
+    expect(ollama.providerType).toBe('ai');
+    expect(ollama.envConfigured).toBe(true);
+    expect(ollama.fields.map((field) => field.key)).toEqual(expect.arrayContaining(['baseUrl', 'model']));
+  });
 });

@@ -1,6 +1,6 @@
 <template>
   <div class="hud-chart-wrap">
-    <canvas ref="canvasEl" aria-label="Telemetry line chart"></canvas>
+    <canvas ref="canvasEl" :aria-label="ariaLabel"></canvas>
   </div>
 </template>
 
@@ -22,6 +22,9 @@ Chart.register(CategoryScale, LinearScale, LineController, LineElement, PointEle
 const props = defineProps({
   labels: { type: Array, default: () => ['09', '10', '11', '12', '13', '14', '15'] },
   values: { type: Array, default: () => [22, 35, 31, 48, 43, 58, 64] },
+  datasetLabel: { type: String, default: 'Value' },
+  valuePrefix: { type: String, default: '' },
+  ariaLabel: { type: String, default: 'Line chart' },
 });
 
 const canvasEl = ref(null);
@@ -40,6 +43,7 @@ function renderChart() {
       labels: props.labels,
       datasets: [
         {
+          label: props.datasetLabel,
           data: props.values,
           borderColor: '#1ed6ff',
           borderWidth: 2,
@@ -66,6 +70,9 @@ function renderChart() {
           borderWidth: 1,
           titleColor: '#dff8ff',
           bodyColor: '#dff8ff',
+          callbacks: {
+            label: (item) => `${props.datasetLabel}: ${props.valuePrefix}${formatValue(item.parsed.y)}`,
+          },
         },
       },
       scales: {
@@ -75,7 +82,12 @@ function renderChart() {
         },
         y: {
           grid: { color: 'rgba(30, 214, 255, 0.08)', drawBorder: false },
-          ticks: { color: 'rgba(223, 248, 255, 0.45)', font: { family: 'DM Sans', size: 11 } },
+          beginAtZero: true,
+          ticks: {
+            color: 'rgba(223, 248, 255, 0.45)',
+            font: { family: 'DM Sans', size: 11 },
+            callback: (value) => `${props.valuePrefix}${formatValue(value)}`,
+          },
         },
       },
     },
@@ -83,6 +95,10 @@ function renderChart() {
 }
 
 onMounted(renderChart);
-watch(() => [props.labels, props.values], renderChart, { deep: true });
+watch(() => [props.labels, props.values, props.datasetLabel, props.valuePrefix], renderChart, { deep: true });
 onBeforeUnmount(() => chart?.destroy());
+
+function formatValue(value) {
+  return Number(value || 0).toFixed(2);
+}
 </script>

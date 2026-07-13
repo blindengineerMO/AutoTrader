@@ -1,12 +1,104 @@
 const tradingAgentRepo = require('../db/repositories/tradingAgentRepo');
 const researchRepo = require('../db/repositories/researchRepo');
+const settingsRepo = require('../db/repositories/settingsRepo');
+const aiClient = require('./strategy/aiClient');
 const researchSourceRepo = require('../db/repositories/researchSourceRepo');
 const brokerAccountRepo = require('../db/repositories/brokerAccountRepo');
 const positionRepo = require('../db/repositories/positionRepo');
 const brainMesh = require('./brainMeshService');
+const watcherAgentService = require('./watcherAgentService');
 const agentWorkspace = require('./agentWorkspaceService');
 const agentResearch = require('./agentResearchService');
 const agentDecisionTree = require('./agentDecisionTreeService');
+
+const MODERATOR_BRAIN_ID = 'agent.council.moderator';
+const DEFAULT_CHALLENGE_BASELINE = 65;
+const CONSENSUS_SOURCE_CREDIBILITY_DELTA = 2;
+const CONSENSUS_SOURCE_RELEVANCE_DELTA = 1;
+let moderatorRegistered = false;
+let sourceCredibilityHandlerRegistered = false;
+
+function ensureSourceCredibilityHandlerRegistered() {
+  if (sourceCredibilityHandlerRegistered) return;
+  sourceCredibilityHandlerRegistered = true;
+  // agent.consensus.ready is broadcast to brain.research.source alongside brain.reporting/
+  // brain.evaluation, but nothing ever picked it up, so winning theses never fed back into
+  // source credibility scoring — this closes that loop.
+  brainMesh.registerHandler('brain.research.source', 'agent.consensus.ready', (envelope) => {
+    const userId = envelope.ctx?.userId;
+    const consensus = envelope.body || {};
+    if (!userId) return { updated: 0 };
+
+    const winningAgentIds = new Set();
+    for (const rec of consensus.finalRecommendations || []) {
+      if (rec.action !== 'buy' && rec.action !== 'sell') continue;
+      for (const vote of rec.votes || []) {
+        if (vote.action === rec.action) winningAgentIds.add(vote.agentId);
+      }
+    }
+
+    let updated = 0;
+    for (const agentId of winningAgentIds) {
+      const agent = tradingAgentRepo.getAgent(userId, agentId);
+      for (const url of agent?.sourceUrls || []) {
+        const source = researchSourceRepo.getByUrl(userId, url);
+        if (!source) continue;
+        researchSourceRepo.updateStats(source.id, {
+          success: true,
+          relevanceDelta: CONSENSUS_SOURCE_RELEVANCE_DELTA,
+          credibilityDelta: CONSENSUS_SOURCE_CREDIBILITY_DELTA,
+        });
+        updated += 1;
+      }
+    }
+    return { updated };
+  });
+}
+
+function ensureModeratorRegistered() {
+  if (moderatorRegistered) return;
+  moderatorRegistered = true;
+  brainMesh.registerAgent({
+    id: MODERATOR_BRAIN_ID,
+    role: 'council-moderator',
+    capabilities: ['agent.thesis.proposed', 'agent.challenge.raised', 'agent.consensus.ready'],
+    metadata: { service: 'personalityAgentService' },
+  });
+  brainMesh.registerHandler(MODERATOR_BRAIN_ID, 'agent.thesis.proposed', (envelope) => ({
+    acknowledged: true,
+    agent: envelope.body?.agent?.name,
+    recommendations: envelope.body?.recommendations?.length || 0,
+  }));
+  brainMesh.registerHandler(MODERATOR_BRAIN_ID, 'agent.challenge.raised', (envelope) => {
+    const debate = envelope.body || {};
+    const counterConviction = Number.isFinite(debate.challengerConviction) ? debate.challengerConviction : DEFAULT_CHALLENGE_BASELINE;
+    const targetConviction = Number(debate.targetConviction ?? 0);
+    const upheld = counterConviction > targetConviction;
+    const weightMultiplier = upheld ? clamp(1 - (counterConviction - targetConviction) / 100, 0.35, 1) : 1;
+    return {
+      resolution: upheld ? 'challenge-upheld' : 'challenge-overruled',
+      targetAgentId: debate.targetAgentId,
+      symbol: debate.symbol,
+      counterConviction,
+      targetConviction,
+      weightMultiplier,
+    };
+  });
+  // agent.profile.ready is broadcast whenever a new/refreshed persona is built, but
+  // watcher coverage for that persona's favorite symbols was never actually seeded —
+  // this auto-creates watcher agents so the two features are actually wired together.
+  brainMesh.registerHandler(MODERATOR_BRAIN_ID, 'agent.profile.ready', (envelope) => {
+    const userId = envelope.ctx?.userId;
+    const watchSymbols = envelope.body?.watchSymbols || [];
+    if (!userId) return { seeded: 0 };
+    let seeded = 0;
+    for (const symbol of watchSymbols) {
+      watcherAgentService.ensureWatcherAgent(userId, { symbol });
+      seeded += 1;
+    }
+    return { seeded };
+  });
+}
 
 const DEFAULT_PERSONAS = [
   {
@@ -139,6 +231,11 @@ function getResearchCreateRun(userId, runId) {
   return agentResearch.getAgentResearchRun(userId, runId);
 }
 
+function refreshAgentPersonalities(userId) {
+  const agents = listAgents(userId).filter((agent) => agent.status === 'active');
+  return agents.map((agent) => startResearchCreateAgent(userId, agent.name));
+}
+
 function updateAgent(userId, id, patch = {}) {
   const existing = tradingAgentRepo.getAgent(userId, id);
   if (!existing) throw new Error('Agent not found');
@@ -194,6 +291,8 @@ function importAgent(userId, payload) {
 }
 
 async function runCouncil({ userId, snapshotId = null, onEvent = () => {} } = {}) {
+  ensureModeratorRegistered();
+  ensureSourceCredibilityHandlerRegistered();
   const agents = listAgents(userId).filter((agent) => agent.status === 'active');
   const snapshot = snapshotId ? researchRepo.getByIdForUser(snapshotId, userId) : researchRepo.listByUser(userId, 1)[0];
   const signals = snapshot?.signals || [];
@@ -238,20 +337,24 @@ async function runCouncil({ userId, snapshotId = null, onEvent = () => {} } = {}
   }
 
   const debates = buildDebateRounds(agents, allRecommendations);
+  const challengeOutcomes = new Map();
   for (const debate of debates) {
-    brainMesh.tell({
+    const result = await brainMesh.ask({
       from: debate.challengerBrainId,
-      to: [debate.targetBrainId, 'agent.council.moderator'],
-      kind: 'event',
+      to: [MODERATOR_BRAIN_ID],
       op: 'agent.challenge.raised',
       ctx: { userId, snapshotId: snapshot?.id || null },
       conv: conversation.id,
       trace: conversation.metadata.trace,
       body: debate,
-    });
+    }, { timeoutMs: 3000 });
+    const resolution = result.replies.find((reply) => reply.kind === 'reply')?.body;
+    if (resolution) {
+      challengeOutcomes.set(`${resolution.targetAgentId}:${resolution.symbol}`, resolution.weightMultiplier);
+    }
   }
 
-  const consensus = buildConsensus(allRecommendations, agents);
+  const consensus = buildConsensus(allRecommendations, agents, challengeOutcomes);
   brainMesh.tell({
     from: 'agent.council.moderator',
     to: ['brain.reporting', 'brain.evaluation', 'brain.research.source'],
@@ -262,6 +365,11 @@ async function runCouncil({ userId, snapshotId = null, onEvent = () => {} } = {}
     trace: conversation.metadata.trace,
     body: consensus,
   });
+
+  const settings = settingsRepo.get(userId);
+  if (settings?.agent_local_learning_enabled) {
+    await applyLocalLearningPass({ userId, agents, allRecommendations, consensus, onEvent });
+  }
 
   const run = tradingAgentRepo.createCouncilRun({
     userId,
@@ -425,13 +533,16 @@ function buildDebateRounds(agents, recommendations) {
     const skeptic = agents.find((agent) => agent.id !== top.agentId && hasRiskPenalty(agent)) || agents.find((agent) => agent.id !== top.agentId);
     if (!skeptic) continue;
     if (actions.size > 1 || top.conviction < 68 || top.evidence.challengePoints?.length) {
+      const challengerRec = recs.find((rec) => rec.agentId === skeptic.id);
       debates.push({
         symbol,
         targetAction: top.action,
         targetAgentId: top.agentId,
         targetBrainId: agents.find((agent) => agent.id === top.agentId)?.brain_id,
+        targetConviction: top.conviction,
         challengerAgentId: skeptic.id,
         challengerBrainId: skeptic.brain_id,
+        challengerConviction: challengerRec ? challengerRec.conviction : null,
         challenge: `${skeptic.name} challenges ${symbol}: ${top.evidence.challengePoints?.[0] || top.evidence.decisionTree?.warnings?.[0] || 'council requires stronger cross-agent evidence before consensus.'}`,
         alternative: top.action === 'buy' ? 'watch' : 'hold',
       });
@@ -440,14 +551,15 @@ function buildDebateRounds(agents, recommendations) {
   return debates.slice(0, 12);
 }
 
-function buildConsensus(recommendations, agents) {
+function buildConsensus(recommendations, agents, challengeOutcomes = new Map()) {
   const agentById = new Map(agents.map((agent) => [agent.id, agent]));
   const grouped = new Map();
   for (const rec of recommendations) {
     const item = grouped.get(rec.symbol) || { symbol: rec.symbol, votes: [], score: 0 };
     const actionWeight = rec.action === 'buy' ? 1 : rec.action === 'watch' ? 0.4 : rec.action === 'sell' ? -1 : 0;
     const learningWeight = Number(agentById.get(rec.agentId)?.model?.learningWeight ?? 1);
-    item.score += actionWeight * rec.conviction * learningWeight;
+    const challengeMultiplier = challengeOutcomes.get(`${rec.agentId}:${rec.symbol}`) ?? 1;
+    item.score += actionWeight * rec.conviction * learningWeight * challengeMultiplier;
     item.votes.push({
       agentId: rec.agentId,
       agentName: agents.find((agent) => agent.id === rec.agentId)?.name,
@@ -485,6 +597,41 @@ function buildConsensus(recommendations, agents) {
     decisionFramework: agentDecisionTree.buildDecisionFramework({}),
     disclaimer: 'Agent recommendations are simulated strategy opinions. They do not mean the named public figures made or endorsed any trade.',
   };
+}
+
+const LOCAL_LEARNING_MAX_DELTA = 0.05;
+
+// Opt-in, off by default: asks whichever AI provider is configured (including a local
+// Ollama fallback) for small bias nudges based on this council run's outcome, so agents
+// incrementally adapt between the expensive nightly full persona refreshes.
+async function applyLocalLearningPass({ userId, agents, allRecommendations, consensus, onEvent = () => {} }) {
+  const providers = aiClient.buildProviders(userId);
+  const systemPrompt = 'You tune small numeric bias weights for simulated trading personas based on a council debate outcome. Respond with strict JSON only.';
+  const userPrompt = JSON.stringify({
+    instructions: 'Given these agent recommendations and the consensus outcome, propose small bias adjustments (delta between -0.05 and 0.05) for agents whose thesis was strongly confirmed or contradicted. Respond as {"biasAdjustments": [{"agentId": string, "sectorOrFactor": string, "delta": number, "rationale": string}]}. Return at most 5 adjustments.',
+    agents: agents.map((agent) => ({ id: agent.id, name: agent.name, bias: agent.bias })),
+    recommendations: allRecommendations.map(stripRecommendationForFrame),
+    consensus: { finalRecommendations: consensus.finalRecommendations },
+  });
+
+  const result = await aiClient.requestStructuredCompletion({ providers, systemPrompt, userPrompt, onEvent });
+  const adjustments = Array.isArray(result?.parsed?.biasAdjustments) ? result.parsed.biasAdjustments : [];
+
+  for (const adjustment of adjustments) {
+    const agent = agents.find((candidate) => candidate.id === adjustment.agentId);
+    if (!agent || !adjustment.sectorOrFactor) continue;
+    const delta = clamp(Number(adjustment.delta) || 0, -LOCAL_LEARNING_MAX_DELTA, LOCAL_LEARNING_MAX_DELTA);
+    if (!delta) continue;
+
+    const key = adjustment.sectorOrFactor;
+    const bucket = agent.bias?.sectors && key in agent.bias.sectors ? 'sectors' : 'factors';
+    const current = Number(agent.bias?.[bucket]?.[key] ?? 0);
+    const nextBias = {
+      ...agent.bias,
+      [bucket]: { ...(agent.bias?.[bucket] || {}), [key]: Number((current + delta).toFixed(4)) },
+    };
+    updateAgent(userId, agent.id, { bias: nextBias });
+  }
 }
 
 function ensureDecisionFramework(agent) {
@@ -615,6 +762,11 @@ function emit(onEvent, phase, progress, level, message, data) {
   onEvent({ phase, progress, level, message, data });
 }
 
+// Registered eagerly at module load (not just inside runCouncil) so agent.profile.ready
+// has a live handler even if a persona research run completes before the first council tick.
+ensureModeratorRegistered();
+ensureSourceCredibilityHandlerRegistered();
+
 module.exports = {
   DEFAULT_PERSONAS,
   ensureDefaultAgents,
@@ -623,10 +775,12 @@ module.exports = {
   createAgentFromProfile,
   startResearchCreateAgent,
   getResearchCreateRun,
+  refreshAgentPersonalities,
   updateAgent,
   deleteAgent,
   exportAgent,
   importAgent,
   runCouncil,
   listCouncilRuns,
+  buildConsensus,
 };

@@ -347,6 +347,18 @@ function registerDefaultAgents() {
       capabilities: ['mesh.status', 'mesh.agent.linked', 'mesh.agent.unlinked'],
       metadata: { service: 'brainMeshService' },
     },
+    {
+      id: 'agent.research.top-level',
+      role: 'top-level-research-agent',
+      capabilities: ['mesh.status', 'watcher.research.reported'],
+      metadata: { service: 'autonomousResearchService' },
+    },
+    {
+      id: 'agent.behavior.supervisor',
+      role: 'upstream-behavior-agent',
+      capabilities: ['mesh.status', 'watcher.grade.issued'],
+      metadata: { service: 'watcherBehaviorService' },
+    },
   ];
   definitions.forEach(registerAgent);
 

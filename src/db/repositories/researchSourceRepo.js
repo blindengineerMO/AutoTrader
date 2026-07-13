@@ -1,4 +1,5 @@
 const db = require('../connection');
+const textVector = require('../../utils/textVector');
 
 const upsertStmt = db.prepare(`
   INSERT INTO research_sources (
@@ -93,6 +94,10 @@ const insertObservationStmt = db.prepare(`
   )
   VALUES (@userId, @sourceId, @researchRunId, @url, @title, @excerpt, @linksJson, @scoreJson)
 `);
+
+let insertObservationFtsStmt;
+let insertObservationVectorStmt;
+let recentVectorsStmt;
 
 function queryByUser(userId, {
   page = 1,
@@ -195,7 +200,45 @@ function recordObservation({ userId, sourceId, researchRunId, url, title, excerp
     linksJson: JSON.stringify(links || []),
     scoreJson: JSON.stringify(score || {}),
   });
+  indexObservation({
+    id: Number(lastInsertRowid),
+    userId,
+    sourceId: sourceId || null,
+    url,
+    title: title || null,
+    excerpt: excerpt || '',
+    score: score || {},
+  });
   return lastInsertRowid;
+}
+
+function indexObservation({ id, userId, sourceId, url, title, excerpt, score }) {
+  const searchText = [
+    title,
+    excerpt,
+    url,
+    Array.isArray(score?.tags) ? score.tags.join(' ') : '',
+    score?.weightedFinancialEvents?.events?.slice?.(0, 5)?.map((event) => event.event?.type).join(' ') || '',
+  ].filter(Boolean).join(' ');
+  try {
+    getInsertObservationFtsStmt().run({
+      rowid: id,
+      title: title || '',
+      excerpt: excerpt || '',
+      url: url || '',
+    });
+    getInsertObservationVectorStmt().run({
+      observationId: id,
+      userId,
+      sourceId,
+      vectorJson: JSON.stringify(textVector.embedText(searchText)),
+      termsJson: JSON.stringify(textVector.topTerms(searchText)),
+      textHash: textVector.textHash(searchText),
+    });
+  } catch {
+    // Older dev/test databases may not have run the semantic-memory migration yet.
+    // Production startup runs migrations before serving requests.
+  }
 }
 
 function updateStats(id, { success = false, relevanceDelta = 0, credibilityDelta = 0 }) {
@@ -209,12 +252,130 @@ function updateStats(id, { success = false, relevanceDelta = 0, credibilityDelta
   return getById(id);
 }
 
+function searchObservationsFullText(userId, query, limit = 12) {
+  const match = buildFtsQuery(query);
+  if (!match) return [];
+  try {
+    return db.prepare(`
+      SELECT
+        rso.id AS observation_id,
+        rso.source_id,
+        rso.url,
+        rso.title,
+        rso.excerpt,
+        rso.score_json,
+        rso.created_at,
+        rs.credibility_score,
+        rs.relevance_score,
+        bm25(research_observation_fts) AS rank
+      FROM research_observation_fts
+      JOIN research_source_observations rso ON rso.id = research_observation_fts.rowid
+      LEFT JOIN research_sources rs ON rs.id = rso.source_id
+      WHERE research_observation_fts MATCH @match AND rso.user_id = @userId
+      ORDER BY rank
+      LIMIT @limit
+    `).all({ userId, match, limit: Math.max(1, Math.min(50, Number(limit) || 12)) }).map(deserializeSearchResult);
+  } catch {
+    return [];
+  }
+}
+
+function listObservationVectors(userId, limit = 250) {
+  try {
+    return getRecentVectorsStmt().all(userId, Math.max(1, Math.min(1000, Number(limit) || 250))).map((row) => ({
+    ...deserializeSearchResult({
+      observation_id: row.observation_id,
+      source_id: row.source_id,
+      url: row.url,
+      title: row.title,
+      excerpt: row.excerpt,
+      score_json: row.score_json,
+      created_at: row.created_at,
+      credibility_score: row.credibility_score,
+      relevance_score: row.relevance_score,
+      rank: 0,
+    }),
+    vector: JSON.parse(row.vector_json || '[]'),
+    terms: JSON.parse(row.terms_json || '[]'),
+    textHash: row.text_hash,
+  }));
+  } catch {
+    return [];
+  }
+}
+
 function deserialize(row) {
   if (!row) return row;
   return {
     ...row,
     tags: JSON.parse(row.tags_json || '[]'),
   };
+}
+
+function deserializeSearchResult(row) {
+  return {
+    observationId: row.observation_id,
+    sourceId: row.source_id,
+    url: row.url,
+    title: row.title,
+    excerpt: row.excerpt,
+    score: JSON.parse(row.score_json || '{}'),
+    createdAt: row.created_at,
+    credibilityScore: row.credibility_score,
+    relevanceScore: row.relevance_score,
+    rank: row.rank,
+  };
+}
+
+function buildFtsQuery(query) {
+  const terms = textVector.tokenize(query)
+    .filter((term) => /^[a-z0-9$.-]+$/i.test(term))
+    .slice(0, 8);
+  return terms.length ? terms.map((term) => `${term.replace(/"/g, '')}*`).join(' OR ') : '';
+}
+
+function getInsertObservationFtsStmt() {
+  if (!insertObservationFtsStmt) {
+    insertObservationFtsStmt = db.prepare(`
+      INSERT INTO research_observation_fts (rowid, title, excerpt, url)
+      VALUES (@rowid, @title, @excerpt, @url)
+    `);
+  }
+  return insertObservationFtsStmt;
+}
+
+function getInsertObservationVectorStmt() {
+  if (!insertObservationVectorStmt) {
+    insertObservationVectorStmt = db.prepare(`
+      INSERT OR REPLACE INTO research_memory_vectors (
+        observation_id, user_id, source_id, vector_json, terms_json, text_hash
+      )
+      VALUES (@observationId, @userId, @sourceId, @vectorJson, @termsJson, @textHash)
+    `);
+  }
+  return insertObservationVectorStmt;
+}
+
+function getRecentVectorsStmt() {
+  if (!recentVectorsStmt) {
+    recentVectorsStmt = db.prepare(`
+      SELECT
+        rmv.*,
+        rso.url,
+        rso.title,
+        rso.excerpt,
+        rso.score_json,
+        rs.credibility_score,
+        rs.relevance_score
+      FROM research_memory_vectors rmv
+      JOIN research_source_observations rso ON rso.id = rmv.observation_id
+      LEFT JOIN research_sources rs ON rs.id = rmv.source_id
+      WHERE rmv.user_id = ?
+      ORDER BY rmv.created_at DESC
+      LIMIT ?
+    `);
+  }
+  return recentVectorsStmt;
 }
 
 function getById(id) {
@@ -234,5 +395,7 @@ module.exports = {
   listActiveByUser: (userId, limit = 25) => activeByUserStmt.all(userId, limit).map(deserialize),
   queryByUser,
   recordObservation,
+  searchObservationsFullText,
+  listObservationVectors,
   updateStats,
 };

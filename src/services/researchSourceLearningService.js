@@ -1,12 +1,15 @@
 const researchSourceRepo = require('../db/repositories/researchSourceRepo');
 const settingsRepo = require('../db/repositories/settingsRepo');
 const crawleeResearchCrawler = require('./crawleeResearchCrawlerService');
+const semanticResearchMemory = require('./semanticResearchMemoryService');
 const {
   SPEC_DISCOVERY_QUERIES,
   SPEC_RELEVANCE_TERMS,
   toResearchSeedSources,
 } = require('./spec/specDataSourceCatalog');
 const logger = require('../utils/logger');
+
+const DUCKDUCKGO_DISCOVERY_TIMEOUT_MS = 3500;
 
 const BASE_SEED_SOURCES = [
   {
@@ -43,6 +46,14 @@ const BASE_SEED_SOURCES = [
   { url: 'https://www.eia.gov/', title: 'EIA Energy Data', tags: ['energy', 'commodities'], credibilityScore: 84 },
   { url: 'https://www.census.gov/retail/index.html', title: 'Census Retail Sales', tags: ['consumer', 'sales'], credibilityScore: 84 },
   { url: 'https://www.commoncrawl.org/', title: 'Common Crawl', tags: ['web-index', 'discovery'], credibilityScore: 70 },
+  ...crawleeResearchCrawler.CURATED_MARKET_NEWS_SITES.map((source) => ({
+    url: source.url,
+    title: source.name,
+    tags: ['seed', ...source.tags],
+    credibilityScore: source.credibilityScore,
+    relevanceScore: 82,
+    notes: 'Curated market-news source for autonomous scraping and site-scoped searches around new companies, existing companies, product launches, company announcements, earnings, acquisitions, and investor-impact news.',
+  })),
 ];
 
 const SEED_SOURCES = dedupeSources([...BASE_SEED_SOURCES, ...toResearchSeedSources()]);
@@ -53,6 +64,9 @@ const DISCOVERY_QUERIES = [
   'US retail sales consumer spending data free',
   'global economic data market indicators free',
   'stock market sector news earnings macro data free',
+  'company announcements new products launches earnings acquisitions stock market impact',
+  'new public companies startups product launch funding partnership stock ticker',
+  'existing company announces product expansion guidance revenue contract acquisition',
   ...SPEC_DISCOVERY_QUERIES,
 ];
 
@@ -107,9 +121,10 @@ async function collectLearnedResearch({ userId, researchRunId, onEvent = () => {
   const settled = await Promise.allSettled(sources.map(async (source) => {
     try {
       const observation = await scrapeSource({ userId, source, researchRunId, onEvent });
+      const weightedSignal = Math.min(2, Math.abs(observation.score.weightedFinancialEvents?.aggregateScore || 0) * 0.25);
       researchSourceRepo.updateStats(source.id, {
         success: true,
-        relevanceDelta: observation.score.relevance >= 3 ? 1.2 : 0.2,
+        relevanceDelta: (observation.score.relevance >= 3 ? 1.2 : 0.2) + weightedSignal,
         credibilityDelta: 0.2,
       });
 
@@ -154,7 +169,25 @@ async function collectLearnedResearch({ userId, researchRunId, onEvent = () => {
 }
 
 async function runCrawleeResearchDiscovery({ userId, researchRunId, onEvent }) {
-  const seedSources = researchSourceRepo.listActiveByUser(userId, 10);
+  const semanticSeeds = semanticResearchMemory.buildSeedSourcesFromMemory({
+    userId,
+    queries: [
+      ...DISCOVERY_QUERIES.slice(0, 8),
+      'weather war crime housing local news company customers offices retail locations supply chain',
+    ],
+    limit: 10,
+  });
+  const seedSources = dedupeSources([...researchSourceRepo.listActiveByUser(userId, 10), ...semanticSeeds]).slice(0, 18);
+  if (semanticSeeds.length) {
+    emit(onEvent, 'source-learning', 13, 'debug', 'Loaded full-text/vector research memory as Crawlee seed sources.', {
+      semanticSeeds: semanticSeeds.map((source) => ({
+        title: source.title,
+        url: source.url,
+        score: source.semanticScore,
+        mode: source.searchMode,
+      })).slice(0, 6),
+    });
+  }
   const crawl = await crawleeResearchCrawler.crawlAutonomousResearch({
     queries: DISCOVERY_QUERIES,
     seedSources,
@@ -174,7 +207,7 @@ async function runCrawleeResearchDiscovery({ userId, researchRunId, onEvent }) {
       userId,
       url: failure.url,
       title: failure.title,
-      sourceType: failure.userData?.type?.includes('google') ? 'search' : 'learned',
+      sourceType: isSearchRequestType(failure.userData?.type) ? 'search' : 'learned',
       status: 'active',
       discoveryMethod: failure.userData?.type || 'crawlee-failed-request',
       discoveredFromUrl: failure.userData?.discoveredFromUrl,
@@ -215,7 +248,7 @@ async function runCrawleeResearchDiscovery({ userId, researchRunId, onEvent }) {
       userId,
       url: page.url,
       title: page.title,
-      sourceType: page.userData?.type?.includes('google') ? 'search' : 'learned',
+      sourceType: isSearchRequestType(page.userData?.type) ? 'search' : 'learned',
       discoveryMethod: page.userData?.type || 'crawlee-crawl',
       discoveredFromUrl: page.userData?.discoveredFromUrl,
       tags: page.score.tags,
@@ -234,6 +267,7 @@ async function runCrawleeResearchDiscovery({ userId, researchRunId, onEvent }) {
         relevance: page.score.relevance,
         credibility: source?.credibility_score || 50,
         tags: page.score.tags,
+        weightedFinancialEvents: page.score.weightedFinancialEvents,
         crawler: 'crawlee-cheerio',
       },
     });
@@ -249,6 +283,7 @@ async function runCrawleeResearchDiscovery({ userId, researchRunId, onEvent }) {
         relevance: page.score.relevance,
         credibility: source?.credibility_score || 50,
         tags: page.score.tags,
+        weightedFinancialEvents: page.score.weightedFinancialEvents,
         crawler: 'crawlee-cheerio',
       },
     });
@@ -282,6 +317,29 @@ async function discoverSources(userId, onEvent) {
         credibilityScore: 48,
       });
     }
+
+    const duckDuckGoLinks = await discoverFromDuckDuckGo(query).catch((err) => {
+      emit(onEvent, 'source-learning', 14, 'warn', 'DuckDuckGo discovery was unavailable; continuing with Google/Common Crawl sources.', {
+        query,
+        error: err.message,
+      });
+      return [];
+    });
+    for (const link of duckDuckGoLinks.slice(0, 5)) {
+      const score = scoreText(`${link.title} ${link.url}`);
+      if (score < 2) continue;
+      discovered.push(link.url);
+      researchSourceRepo.upsert({
+        userId,
+        url: link.url,
+        title: link.title,
+        sourceType: 'learned',
+        discoveryMethod: 'duckduckgo-search',
+        tags: inferTags(`${link.title} ${link.url}`),
+        relevanceScore: Math.min(82, 42 + score * 7),
+        credibilityScore: 48,
+      });
+    }
   }
 
   const commonCrawlLinks = await discoverFromCommonCrawl('market data sources').catch(() => []);
@@ -305,7 +363,7 @@ async function discoverFromGoogle(query) {
   const url = new URL('https://www.google.com/search');
   url.searchParams.set('q', query);
   url.searchParams.set('num', '10');
-  const html = await fetchText(url.toString(), 8000);
+  const html = await fetchText(url.toString(), DUCKDUCKGO_DISCOVERY_TIMEOUT_MS);
   const links = [];
   const hrefMatches = [...html.matchAll(/href="([^"]+)"/g)];
   for (const match of hrefMatches) {
@@ -317,6 +375,20 @@ async function discoverFromGoogle(query) {
     if (!href.startsWith('http') || href.includes('google.com')) continue;
     links.push({ url: cleanUrl(href), title: hostnameTitle(href) });
   }
+  return uniqueLinks(links);
+}
+
+async function discoverFromDuckDuckGo(query) {
+  const url = new URL('https://duckduckgo.com/html/');
+  url.searchParams.set('q', query);
+  url.searchParams.set('kl', 'us-en');
+  const html = await fetchText(url.toString(), 8000);
+  if (/Unfortunately,\s+bots\s+use\s+DuckDuckGo\s+too|challenge-form|anomaly-modal/i.test(html)) {
+    throw new Error('DuckDuckGo returned an anti-bot challenge page');
+  }
+  const links = extractLinks(html, url.toString())
+    .map((link) => ({ ...link, url: unwrapDuckDuckGoRedirect(link.url) }))
+    .filter((link) => link.url.startsWith('http') && !link.url.includes('duckduckgo.com/'));
   return uniqueLinks(links);
 }
 
@@ -360,6 +432,7 @@ async function scrapeSource({ userId, source, researchRunId, onEvent }) {
       relevance,
       credibility: source.credibility_score,
       tags: page.score.tags,
+      weightedFinancialEvents: page.score.weightedFinancialEvents,
       crawler: 'crawlee-cheerio',
     },
   };
@@ -402,6 +475,18 @@ function extractLinks(html, baseUrl) {
     }
   }
   return uniqueLinks(links);
+}
+
+function unwrapDuckDuckGoRedirect(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname.includes('duckduckgo.com') && parsed.searchParams.has('uddg')) {
+      return cleanUrl(parsed.searchParams.get('uddg'));
+    }
+    return cleanUrl(url);
+  } catch {
+    return url;
+  }
 }
 
 function scoreText(text) {
@@ -472,6 +557,10 @@ function emit(onEvent, phase, progress, level, message, data) {
   if (level === 'warn') logger.warn(message, data || {});
 }
 
+function isSearchRequestType(type) {
+  return /google|duckduckgo|search|rss/i.test(String(type || ''));
+}
+
 function dedupeSources(sources) {
   const seen = new Set();
   return sources.filter((source) => {
@@ -485,6 +574,7 @@ module.exports = {
   seedSources,
   collectLearnedResearch,
   discoverFromGoogle,
+  discoverFromDuckDuckGo,
   discoverFromCommonCrawl,
   scoreText,
   SEED_SOURCES,

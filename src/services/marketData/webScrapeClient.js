@@ -37,6 +37,7 @@ async function getYahooHistory(symbol, range = '5y', interval = '1mo') {
   const url = new URL('https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol));
   url.searchParams.set('range', range);
   url.searchParams.set('interval', interval);
+  url.searchParams.set('events', 'split');
   const res = await fetch(url.toString(), {
     headers: {
       'User-Agent': 'Mozilla/5.0 AutoTrader research bot',
@@ -47,6 +48,7 @@ async function getYahooHistory(symbol, range = '5y', interval = '1mo') {
   const data = await res.json();
   const result = data.chart?.result?.[0];
   const quote = result?.indicators?.quote?.[0];
+  const timestamps = result?.timestamp || [];
   const closes = (quote?.close || []).filter((n) => Number.isFinite(n));
   if (closes.length < 2) throw new Error('Yahoo historical response did not include enough close data');
   const first = closes[0];
@@ -58,6 +60,22 @@ async function getYahooHistory(symbol, range = '5y', interval = '1mo') {
     const drawdown = peak ? ((close - peak) / peak) * 100 : 0;
     maxDrawdownPct = Math.min(maxDrawdownPct, drawdown);
   }
+  const splitEvents = Object.values(result?.events?.splits || {})
+    .map((event) => ({
+      date: event.date ? new Date(event.date * 1000).toISOString() : null,
+      numerator: Number(event.numerator || 0),
+      denominator: Number(event.denominator || 0),
+      splitRatio: event.splitRatio || (event.numerator && event.denominator ? `${event.numerator}:${event.denominator}` : null),
+    }))
+    .filter((event) => event.date)
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const firstTimestamp = timestamps.find((value) => Number.isFinite(value));
+  const lastTimestamp = [...timestamps].reverse().find((value) => Number.isFinite(value));
+  const years = firstTimestamp && lastTimestamp
+    ? Math.max(0.1, (lastTimestamp - firstTimestamp) / (365.25 * 24 * 60 * 60))
+    : 5;
+  const totalReturnPct = ((last - first) / first) * 100;
+  const annualizedReturnPct = (Math.pow(last / first, 1 / years) - 1) * 100;
   return {
     symbol,
     range,
@@ -65,9 +83,32 @@ async function getYahooHistory(symbol, range = '5y', interval = '1mo') {
     firstClose: first,
     lastClose: last,
     points: closes.length,
-    fiveYearReturnPct: Number((((last - first) / first) * 100).toFixed(2)),
+    years: Number(years.toFixed(2)),
+    fiveYearReturnPct: Number(totalReturnPct.toFixed(2)),
+    annualizedReturnPct: Number(annualizedReturnPct.toFixed(2)),
     maxDrawdownPct: Number(maxDrawdownPct.toFixed(2)),
+    stockSplitsPast5Years: splitEvents.length,
+    splitEvents,
   };
+}
+
+async function getYahooDailyCloses(symbol, range = '2y') {
+  const url = new URL('https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol));
+  url.searchParams.set('range', range);
+  url.searchParams.set('interval', '1d');
+  const res = await fetch(url.toString(), {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 AutoTrader research bot',
+      Accept: 'application/json,text/plain,*/*',
+    },
+  });
+  if (!res.ok) throw new Error(`Yahoo daily closes scrape failed: ${res.status}`);
+  const data = await res.json();
+  const result = data.chart?.result?.[0];
+  const quote = result?.indicators?.quote?.[0];
+  const closes = (quote?.close || []).filter((n) => Number.isFinite(n));
+  if (closes.length < 30) throw new Error('Yahoo daily closes response did not include enough data');
+  return closes;
 }
 
 async function getStooqQuote(symbol) {
@@ -117,4 +158,4 @@ async function getQuotes(symbols) {
   return results;
 }
 
-module.exports = { getQuote, getQuotes, getHistoricalStats: getYahooHistory };
+module.exports = { getQuote, getQuotes, getHistoricalStats: getYahooHistory, getDailyCloses: getYahooDailyCloses };

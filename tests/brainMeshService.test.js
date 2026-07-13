@@ -55,4 +55,41 @@ describe('brainMeshService', () => {
     const messages = brainMesh.listMessages({ userId: user.id, traceId: conversation.metadata.trace, limit: 10 });
     expect(messages.map((message) => message.envelope.kind)).toEqual(expect.arrayContaining(['ask', 'reply']));
   });
+
+  it('invokes a registered handler when tell() dispatches to it, so fire-and-forget events actually do something', async () => {
+    let received = null;
+    brainMesh.registerHandler('agent.test.tell-target', 'test.signal.reported', (envelope) => {
+      received = envelope.body;
+      return { acknowledged: true };
+    });
+
+    brainMesh.tell({
+      from: 'agent.test.tell-source',
+      to: ['agent.test.tell-target'],
+      kind: 'event',
+      op: 'test.signal.reported',
+      ctx: {},
+      body: { value: 42 },
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(received).toEqual({ value: 42 });
+  });
+
+  it('returns the handler return value via reply() when using ask()', async () => {
+    brainMesh.registerHandler('agent.test.ask-target', 'test.question.asked', (envelope) => ({
+      answer: envelope.body.question === 'ping' ? 'pong' : 'unknown',
+    }));
+
+    const result = await brainMesh.ask({
+      from: 'agent.test.ask-source',
+      to: ['agent.test.ask-target'],
+      op: 'test.question.asked',
+      ctx: {},
+      body: { question: 'ping' },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.replies[0].body).toEqual({ answer: 'pong' });
+  });
 });

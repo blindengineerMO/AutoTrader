@@ -52,12 +52,65 @@ test.describe('AutoTrader UI', () => {
     await expect(page.getByText('No orders yet.')).toBeVisible();
   });
 
+  test('navigate to Watchers view', async ({ page }) => {
+    await registerAndLogin(page);
+    await page.getByRole('link', { name: 'Watchers' }).click();
+    await expect(page).toHaveURL('/watchers');
+    await expect(page.getByRole('heading', { name: 'Watcher Agents' })).toBeVisible();
+    await expect(page.getByText('No watcher agents yet.')).toBeVisible();
+  });
+
+  test('navigate to Agents view', async ({ page }) => {
+    await registerAndLogin(page);
+    await page.getByRole('link', { name: 'Agents' }).click();
+    await expect(page).toHaveURL('/agents');
+    await expect(page.getByRole('heading', { name: 'Agent Council' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Run council' })).toBeVisible();
+    await expect(page.getByText('Bill Gates').first()).toBeVisible();
+  });
+
+  test('navigate to Workspace view', async ({ page }) => {
+    await registerAndLogin(page);
+    await page.getByRole('link', { name: 'Workspace' }).click();
+    await expect(page).toHaveURL('/workspace');
+    await expect(page.getByRole('heading', { name: 'Company Workspace' })).toBeVisible();
+    await expect(page.getByText(/No company intelligence yet/)).toBeVisible();
+  });
+
+  test('navigate to Reports view', async ({ page }) => {
+    await registerAndLogin(page);
+    await page.getByRole('link', { name: 'Reports' }).click();
+    await expect(page).toHaveURL('/reports');
+    await expect(page.getByRole('heading', { name: 'Reports', exact: true })).toBeVisible();
+    await expect(page.getByText('No evaluation reports yet.')).toBeVisible();
+    await expect(page.getByText('No decision reports yet.')).toBeVisible();
+  });
+
   test('logout returns to login screen and blocks dashboard access', async ({ page }) => {
     await registerAndLogin(page);
+    await page.locator('.profile-trigger').click();
     await page.getByRole('button', { name: 'Log out' }).click();
     await expect(page).toHaveURL('/login');
 
     await page.goto('/');
     await expect(page).toHaveURL(/\/login/);
+  });
+
+  test('notification bell shows preferences and dashboard grid is draggable', async ({ page }) => {
+    await registerAndLogin(page);
+    await expect(page.locator('.widget-grid')).toBeVisible();
+    await page.locator('.bell-trigger').click();
+    await page.getByText('Notification preferences').click();
+    await expect(page.getByText('Kill switch alerts')).toBeVisible();
+  });
+
+  test('reports view renders a 90-day forecast fan chart', async ({ page }) => {
+    test.setTimeout(45000);
+    await registerAndLogin(page);
+    await page.getByRole('link', { name: 'Reports' }).click();
+    await expect(page).toHaveURL('/reports');
+    await page.fill('.forecast-symbol-input', 'AAPL');
+    await page.getByRole('button', { name: 'Run forecast' }).click();
+    await expect(page.getByText('median day-90 price')).toBeVisible({ timeout: 20000 });
   });
 });

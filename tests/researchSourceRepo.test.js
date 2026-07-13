@@ -14,6 +14,7 @@ migrate();
 
 const userRepo = require('../src/db/repositories/userRepo');
 const researchSourceRepo = require('../src/db/repositories/researchSourceRepo');
+const semanticResearchMemory = require('../src/services/semanticResearchMemoryService');
 
 describe('researchSourceRepo', () => {
   it('retires repeatedly failed learned URLs and reactivates them when re-learned', () => {
@@ -125,5 +126,44 @@ describe('researchSourceRepo', () => {
     expect(paged.totalPages).toBe(3);
     expect(paged.items).toHaveLength(1);
     expect(paged.items[0].title).toBe('FRED Macro');
+  });
+
+  it('indexes observations for full-text and vector research memory search', () => {
+    const user = userRepo.createUser({
+      email: `sources-semantic-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+    const source = researchSourceRepo.upsert({
+      userId: user.id,
+      url: 'https://example.com/company-location-impact',
+      title: 'Retail exposure and storm disruption',
+      sourceType: 'learned',
+      discoveryMethod: 'test',
+      tags: ['location-intel', 'weather'],
+    });
+
+    researchSourceRepo.recordObservation({
+      userId: user.id,
+      sourceId: source.id,
+      researchRunId: null,
+      url: source.url,
+      title: 'Florida retail customers face hurricane disruption',
+      excerpt: 'Company stores, distribution routes, and customers in Florida may be affected by a hurricane.',
+      links: [],
+      score: { relevance: 6, tags: ['location-intel', 'weather'] },
+    });
+
+    const fullText = researchSourceRepo.searchObservationsFullText(user.id, 'Florida hurricane retail customers', 5);
+    expect(fullText[0].url).toBe(source.url);
+
+    const semantic = semanticResearchMemory.searchResearchMemory({
+      userId: user.id,
+      query: 'storm impact on retail locations and customer demand',
+      limit: 5,
+    });
+    expect(semantic.map((item) => item.url)).toContain(source.url);
+    expect(semantic[0].combinedScore).toBeGreaterThan(0);
   });
 });

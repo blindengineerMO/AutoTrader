@@ -34,6 +34,7 @@ function buildDecisionReport({
             macroRisk: signal.macroRisk,
             consumerBias: signal.consumerBias,
             brokerFactorScore: signal.brokerFactorScore,
+            historicalWatchFactors: signal.evidence?.historicalWatchFactors || [],
             investorPlaybookScore: signal.investorPlaybookScore,
             investorPlaybook: signal.evidence?.investorPlaybook || null,
             jsonDatasetScore: signal.jsonDatasetScore,

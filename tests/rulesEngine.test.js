@@ -78,7 +78,7 @@ describe('rulesEngine.checkTradeAllowed', () => {
     expect(result.allowed).toBe(true);
   });
 
-  it('blocks trades once the daily loss limit is breached', () => {
+  it('blocks trades once the daily loss limit is breached, and latches as a real kill switch', () => {
     pnlRepo.record({
       userId,
       brokerAccountId,
@@ -90,6 +90,25 @@ describe('rulesEngine.checkTradeAllowed', () => {
     const result = rulesEngine.checkTradeAllowed({ userId, symbol: 'TSLA', side: 'buy', estimatedUsd: 10 });
     expect(result.allowed).toBe(false);
     expect(result.reason).toMatch(/loss limit/);
+    expect(settingsRepo.get(userId).daily_loss_limit_kill_switch_engaged).toBe(1);
+
+    // Unlike a live threshold check, it must stay engaged even once today's
+    // running P&L is no longer below the limit — only an explicit clear can reset it.
+    pnlRepo.record({
+      userId,
+      brokerAccountId,
+      orderId: null,
+      realizedPnlUsd: 100,
+      balanceAfterUsd: 185,
+      note: 'recovered',
+    });
+    const stillBlocked = rulesEngine.checkTradeAllowed({ userId, symbol: 'TSLA', side: 'buy', estimatedUsd: 10 });
+    expect(stillBlocked.allowed).toBe(false);
+    expect(stillBlocked.reason).toMatch(/daily_loss_limit_kill_switch is engaged/);
+
+    settingsRepo.clearAutoKillSwitch(userId, 'daily_loss_limit_kill_switch', 'operator-ack');
+    const clearedResult = rulesEngine.checkTradeAllowed({ userId, symbol: 'TSLA', side: 'buy', estimatedUsd: 10 });
+    expect(clearedResult.allowed).toBe(true);
   });
 
   it('never allows a deposit/transfer_in action regardless of other state', () => {

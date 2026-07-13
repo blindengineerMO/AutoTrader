@@ -10,6 +10,7 @@ const specOperationsRepo = require('../db/repositories/specOperationsRepo');
 const researchService = require('../services/researchService');
 const autonomousResearchService = require('../services/autonomousResearchService');
 const evaluationService = require('../services/evaluationService');
+const forecastService = require('../services/forecastService');
 const safeResearchMvpService = require('../services/spec/safeResearchMvpService');
 const modelPromotionService = require('../services/spec/modelPromotionService');
 const { runTradingCycle } = require('../services/tradingCycle');
@@ -38,6 +39,16 @@ router.get('/reports', (req, res) => {
 router.get('/evaluations', (req, res) => {
   const limit = Number(req.query.limit) || 30;
   res.json(evaluationReportRepo.listByUser(req.user.id, limit));
+});
+
+router.get('/forecast/:symbol', async (req, res) => {
+  try {
+    const forecast = await forecastService.getForecast(req.user.id, req.params.symbol.toUpperCase());
+    res.json(forecast);
+  } catch (err) {
+    logger.error('Forecast generation failed', { userId: req.user.id, symbol: req.params.symbol, error: err.message });
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.get('/spec-monitoring', (req, res) => {

@@ -17,6 +17,33 @@
               @update:model-value="save"
             />
 
+            <v-select
+              v-model="form.applicationTimezone"
+              :items="timezoneItems"
+              label="Application timezone"
+              variant="outlined"
+              density="comfortable"
+              hide-details
+            />
+
+            <v-text-field
+              v-model="form.tradingStartTime"
+              type="time"
+              label="Trading start time"
+              variant="outlined"
+              density="comfortable"
+              hide-details
+            />
+
+            <v-text-field
+              v-model="form.tradingEndTime"
+              type="time"
+              label="Trading stop time"
+              variant="outlined"
+              density="comfortable"
+              hide-details
+            />
+
             <v-text-field
               v-model="form.researchCadenceCron"
               label="Research cadence (cron expression)"
@@ -28,6 +55,22 @@
             <v-text-field
               v-model="form.evaluationCadenceCron"
               label="Evaluation cadence (cron expression)"
+              variant="outlined"
+              density="comfortable"
+              hide-details
+            />
+
+            <v-text-field
+              v-model="form.watcherCycleCadenceCron"
+              label="Watcher research cadence (cron expression)"
+              variant="outlined"
+              density="comfortable"
+              hide-details
+            />
+
+            <v-text-field
+              v-model="form.personalityTickCadenceCron"
+              label="Personality tick cadence (cron expression)"
               variant="outlined"
               density="comfortable"
               hide-details
@@ -62,6 +105,70 @@
           <div class="flex items-center gap-3 mt-5">
             <GlassButton :disabled="saving" @click="save">{{ saving ? 'Saving...' : 'Save settings' }}</GlassButton>
             <div v-if="saved" class="text-accent text-xs">Saved.</div>
+          </div>
+        </GlassCard>
+
+        <GlassCard title="Persistent simulation">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+            <v-switch
+              v-model="form.simulationModeEnabled"
+              label="Simulation mode"
+              color="primary"
+              hide-details
+            />
+
+            <v-text-field
+              v-model.number="form.simulationStartingCashUsd"
+              type="number"
+              min="1"
+              step="1"
+              label="Starting cash cap (USD)"
+              variant="outlined"
+              density="comfortable"
+              hide-details
+            />
+
+            <v-switch
+              v-model="form.agentPersonalityRefreshEnabled"
+              label="Evening agent re-research"
+              color="primary"
+              hide-details
+            />
+
+            <v-text-field
+              v-model="form.agentPersonalityRefreshTime"
+              type="time"
+              label="Agent refresh time"
+              variant="outlined"
+              density="comfortable"
+              hide-details
+            />
+
+            <v-switch
+              v-model="form.agentLocalLearningEnabled"
+              label="Hourly local-LLM bias learning"
+              color="primary"
+              hide-details
+            />
+          </div>
+
+          <div class="simulation-status-grid mt-5">
+            <div class="mini-glass p-4">
+              <div class="text-xs text-white/38 uppercase tracking-wide">Started</div>
+              <div class="font-medium mt-1">{{ formatStamp(settingsStatus.simulationStartedAt) }}</div>
+            </div>
+            <div class="mini-glass p-4">
+              <div class="text-xs text-white/38 uppercase tracking-wide">Last morning cycle</div>
+              <div class="font-medium mt-1">{{ formatStamp(settingsStatus.simulationLastCycleAt) }}</div>
+            </div>
+            <div class="mini-glass p-4">
+              <div class="text-xs text-white/38 uppercase tracking-wide">Last close evaluation</div>
+              <div class="font-medium mt-1">{{ formatStamp(settingsStatus.simulationLastEvaluationAt) }}</div>
+            </div>
+            <div class="mini-glass p-4">
+              <div class="text-xs text-white/38 uppercase tracking-wide">Agent refresh</div>
+              <div class="font-medium mt-1">{{ formatStamp(settingsStatus.agentPersonalityLastRefreshedAt) }}</div>
+            </div>
           </div>
         </GlassCard>
 
@@ -262,7 +369,23 @@ const form = ref({
   maxTradesPerSymbolPer24h: 3,
   researchCadenceCron: '',
   evaluationCadenceCron: '0 0 * * *',
+  watcherCycleCadenceCron: '0 * * * *',
+  personalityTickCadenceCron: '0 * * * *',
   sourceLearningEnabled: true,
+  applicationTimezone: 'America/New_York',
+  tradingStartTime: '09:30',
+  tradingEndTime: '16:00',
+  simulationModeEnabled: false,
+  simulationStartingCashUsd: 100,
+  agentPersonalityRefreshEnabled: true,
+  agentPersonalityRefreshTime: '20:00',
+  agentLocalLearningEnabled: false,
+});
+const settingsStatus = ref({
+  simulationStartedAt: null,
+  simulationLastCycleAt: null,
+  simulationLastEvaluationAt: null,
+  agentPersonalityLastRefreshedAt: null,
 });
 const killSwitchEngaged = ref(false);
 const saving = ref(false);
@@ -310,6 +433,16 @@ const sourceSortItems = [
   { title: 'Status', value: 'status' },
   { title: 'Type', value: 'source_type' },
 ];
+const timezoneItems = [
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Phoenix',
+  'America/Los_Angeles',
+  'America/Anchorage',
+  'Pacific/Honolulu',
+  'UTC',
+];
 
 async function load() {
   const [{ data }, providerRes] = await Promise.all([
@@ -322,8 +455,19 @@ async function load() {
     maxTradesPerSymbolPer24h: data.max_trades_per_symbol_per_24h,
     researchCadenceCron: data.research_cadence_cron,
     evaluationCadenceCron: data.evaluation_cadence_cron || '0 0 * * *',
+    watcherCycleCadenceCron: data.watcher_cycle_cadence_cron || '0 * * * *',
+    personalityTickCadenceCron: data.personality_tick_cadence_cron || '0 * * * *',
     sourceLearningEnabled: Boolean(data.source_learning_enabled),
+    applicationTimezone: data.application_timezone || 'America/New_York',
+    tradingStartTime: data.trading_start_time || '09:30',
+    tradingEndTime: data.trading_end_time || '16:00',
+    simulationModeEnabled: Boolean(data.simulation_mode_enabled),
+    simulationStartingCashUsd: data.simulation_starting_cash_usd || 100,
+    agentPersonalityRefreshEnabled: Boolean(data.agent_personality_refresh_enabled),
+    agentPersonalityRefreshTime: data.agent_personality_refresh_time || '20:00',
+    agentLocalLearningEnabled: Boolean(data.agent_local_learning_enabled),
   };
+  syncSettingsStatus(data);
   killSwitchEngaged.value = Boolean(data.kill_switch_engaged);
   providers.value = providerRes.data;
   providerDrafts.value = Object.fromEntries(
@@ -376,7 +520,8 @@ async function save() {
   saving.value = true;
   saved.value = false;
   try {
-    await api.patch('/settings', form.value);
+    const { data } = await api.patch('/settings', form.value);
+    syncSettingsStatus(data);
     saved.value = true;
   } finally {
     saving.value = false;
@@ -422,7 +567,22 @@ async function toggleKillSwitch() {
 function providerIcon(type) {
   if (type === 'broker') return 'mdi-bank';
   if (type === 'market-data') return 'mdi-chart-timeline-variant';
+  if (type === 'data-source') return 'mdi-database-search';
   return 'mdi-brain';
+}
+
+function syncSettingsStatus(data) {
+  settingsStatus.value = {
+    simulationStartedAt: data.simulation_started_at,
+    simulationLastCycleAt: data.simulation_last_cycle_at,
+    simulationLastEvaluationAt: data.simulation_last_evaluation_at,
+    agentPersonalityLastRefreshedAt: data.agent_personality_last_refreshed_at,
+  };
+}
+
+function formatStamp(value) {
+  if (!value) return 'not run';
+  return new Date(value).toLocaleString();
 }
 
 async function saveProvider(provider) {
@@ -443,3 +603,17 @@ async function saveProvider(provider) {
 
 onMounted(load);
 </script>
+
+<style scoped>
+.simulation-status-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 720px) {
+  .simulation-status-grid {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

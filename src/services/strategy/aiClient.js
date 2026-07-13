@@ -51,7 +51,46 @@ function buildProviders(userId) {
       provider: 'groq',
     });
   }
+  // Appended last: a local Ollama instance only gets used when no hosted provider is
+  // configured or every hosted provider above it failed, preserving today's fallback order.
+  const userOllama = userId ? providerCredentialRepo.getSecret(userId, 'ollama') : null;
+  const ollamaBaseUrl = userOllama?.baseUrl || config.ollamaBaseUrl;
+  const ollamaModel = userOllama?.model || config.ollamaModel;
+  if (ollamaBaseUrl) {
+    providers.push({
+      client: new OpenAI({ apiKey: 'ollama-local', baseURL: ollamaBaseUrl }),
+      model: ollamaModel,
+      provider: 'ollama',
+    });
+  }
   return providers;
+}
+
+async function requestStructuredCompletion({ providers, systemPrompt, userPrompt, onEvent = () => {} }) {
+  let lastError;
+  for (const { client, model, provider } of providers) {
+    try {
+      emit(onEvent, 'strategy', 86, 'debug', 'Requesting structured completion from provider.', { provider, model });
+      const completion = await client.chat.completions.create({
+        model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.3,
+      });
+      const raw = completion.choices[0]?.message?.content || '{}';
+      const parsed = JSON.parse(raw);
+      return { provider, model, parsed };
+    } catch (err) {
+      logger.warn('AI provider failed, trying next if available', { provider, error: err.message });
+      emit(onEvent, 'strategy', 87, 'warn', 'Provider failed; trying next provider if available.', { provider, error: err.message });
+      lastError = err;
+    }
+  }
+  if (lastError) logger.warn('All AI providers failed for structured completion request', { error: lastError.message });
+  return null;
 }
 
 function generateRulesBasedPlan({ researchSnapshot, accountState, recentTradeCounts, reason }) {
@@ -108,7 +147,6 @@ async function generateTradingPlan({ userId, researchSnapshot, accountState, rec
     recentTradeCounts,
   });
 
-  let lastError;
   if (!providers.length) {
     emit(onEvent, 'strategy', 85, 'warn', 'No AI credentials available; using transparent rules-based strategy fallback.');
     return generateRulesBasedPlan({
@@ -119,38 +157,14 @@ async function generateTradingPlan({ userId, researchSnapshot, accountState, rec
     });
   }
 
-  for (const { client, model, provider } of providers) {
-    logger.info('Requesting trading plan from AI', { provider, model, snapshotId: researchSnapshot.id });
-    try {
-      emit(onEvent, 'strategy', 86, 'debug', 'Requesting final trading plan from strategy provider.', {
-        provider,
-        model,
-      });
-      const completion = await client.chat.completions.create({
-        model,
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: userPrompt },
-        ],
-        response_format: { type: 'json_object' },
-        temperature: 0.3,
-      });
-
-      const raw = completion.choices[0]?.message?.content || '{}';
-      const parsed = JSON.parse(raw);
-      emit(onEvent, 'strategy', 89, 'debug', 'Strategy provider returned structured trading plan.', {
-        provider,
-        actions: parsed.actions?.length || 0,
-      });
-      return { modelUsed: `${provider}:${model}`, raw: parsed };
-    } catch (err) {
-      logger.warn('AI provider failed, trying next if available', { provider, error: err.message });
-      emit(onEvent, 'strategy', 87, 'warn', 'Strategy provider failed; trying next provider or fallback.', {
-        provider,
-        error: err.message,
-      });
-      lastError = err;
-    }
+  logger.info('Requesting trading plan from AI', { providers: providers.map((p) => p.provider), snapshotId: researchSnapshot.id });
+  const result = await requestStructuredCompletion({ providers, systemPrompt: SYSTEM_PROMPT, userPrompt, onEvent });
+  if (result) {
+    emit(onEvent, 'strategy', 89, 'debug', 'Strategy provider returned structured trading plan.', {
+      provider: result.provider,
+      actions: result.parsed.actions?.length || 0,
+    });
+    return { modelUsed: `${result.provider}:${result.model}`, raw: result.parsed };
   }
 
   emit(onEvent, 'strategy', 89, 'warn', 'All strategy providers failed; using transparent rules-based fallback.');
@@ -158,7 +172,7 @@ async function generateTradingPlan({ userId, researchSnapshot, accountState, rec
     researchSnapshot,
     accountState,
     recentTradeCounts,
-    reason: `All AI providers failed or had no credits (${lastError?.message || 'unknown error'}), so the system generated a transparent rules-based fallback plan.`,
+    reason: 'All AI providers failed or had no credits, so the system generated a transparent rules-based fallback plan.',
   });
 }
 
@@ -166,4 +180,4 @@ function emit(onEvent, phase, progress, level, message, data) {
   onEvent({ phase, progress, level, message, data });
 }
 
-module.exports = { generateTradingPlan, generateRulesBasedPlan };
+module.exports = { generateTradingPlan, generateRulesBasedPlan, buildProviders, requestStructuredCompletion };
