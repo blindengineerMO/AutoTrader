@@ -12,9 +12,9 @@ import backgroundArt from '../assets/background.png';
 // Darkening/tint overlay sits on top of the art so glass panels keep contrast
 // regardless of the source image's own brightness/color balance.
 const imageStyle = {
-  backgroundImage: `linear-gradient(160deg, rgba(9,15,25,0.72), rgba(11,17,28,0.68) 60%, rgba(8,14,23,0.78)),
-    radial-gradient(circle at 20% 20%, rgba(39,215,255,0.08), transparent 45%),
-    radial-gradient(circle at 82% 78%, rgba(138,92,255,0.08), transparent 50%),
+  backgroundImage: `linear-gradient(160deg, rgba(9,15,25,0.48), rgba(11,17,28,0.52) 58%, rgba(8,14,23,0.66)),
+    radial-gradient(circle at 20% 20%, rgba(39,215,255,0.12), transparent 45%),
+    radial-gradient(circle at 82% 78%, rgba(138,92,255,0.12), transparent 50%),
     url(${backgroundArt})`,
 };
 

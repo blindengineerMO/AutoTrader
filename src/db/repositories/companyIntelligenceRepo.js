@@ -10,6 +10,7 @@ const upsertStmt = db.prepare(`
     updated_at = datetime('now')
 `);
 const listStmt = db.prepare('SELECT * FROM company_intelligence WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?');
+const listStalestStmt = db.prepare('SELECT * FROM company_intelligence WHERE user_id = ? ORDER BY last_researched_at ASC LIMIT ?');
 const bySymbolStmt = db.prepare('SELECT * FROM company_intelligence WHERE user_id = ? AND symbol = ?');
 
 function save({ userId, symbol, companyName, summary }) {
@@ -35,4 +36,5 @@ module.exports = {
   save,
   getBySymbol,
   listByUser: (userId, limit = 100) => listStmt.all(userId, limit).map(deserialize),
+  listStalest: (userId, limit = 10) => listStalestStmt.all(userId, limit).map(deserialize),
 };

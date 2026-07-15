@@ -50,7 +50,7 @@ function reportWatcherSignal(userId, symbol, predictedAction, localAiScore) {
 
 describe('autonomousResearchService.NEWS_FEEDS', () => {
   it('includes market, discovery, regulatory, filing, and contract feeds', () => {
-    expect(NEWS_FEEDS).toHaveLength(36);
+    expect(NEWS_FEEDS).toHaveLength(45);
   });
 
   it('has a well-formed name, region, and https url for every feed', () => {
@@ -111,6 +111,24 @@ describe('autonomousResearchService.NEWS_FEEDS', () => {
       'https://www.consumerfinance.gov/about-us/blog/feed/',
       'https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/press-releases/rss.xml',
       'https://www.defense.gov/DesktopModules/ArticleCS/RSS.ashx?ContentType=1&Site=945&Category=549&max=20',
+    ];
+    const urls = NEWS_FEEDS.map((feed) => feed.url);
+    for (const expected of expectedUrls) {
+      expect(urls).toContain(expected);
+    }
+  });
+
+  it('includes issuer-paid press release discovery feeds for company events', () => {
+    const expectedUrls = [
+      'https://www.globenewswire.com/RssFeed/orgclass/1/feedTitle/GlobeNewswire%20-%20News%20about%20Public%20Companies',
+      'https://www.globenewswire.com/RssFeed/subjectcode/13-Earnings%20Releases%20And%20Operating%20Results/feedTitle/GlobeNewswire%20-%20Earnings%20Releases%20And%20Operating%20Results',
+      'https://www.globenewswire.com/RssFeed/subjectcode/27-Mergers%20And%20Acquisitions/feedTitle/GlobeNewswire%20-%20Mergers%20And%20Acquisitions',
+      'https://www.globenewswire.com/RssFeed/subjectcode/9-Company%20Announcement/feedTitle/GlobeNewswire%20-%20Company%20Announcement',
+      'https://www.globenewswire.com/RssFeed/subjectcode/21-Initial%20Public%20Offerings/feedTitle/GlobeNewswire%20-%20Initial%20Public%20Offerings',
+      'https://www.globenewswire.com/RssFeed/subjectcode/29-Partnerships/feedTitle/GlobeNewswire%20-%20Partnerships',
+      'https://www.globenewswire.com/RssFeed/subjectcode/32-Product%202f%20Services%20Announcement/feedTitle/GlobeNewswire%20-%20Product%20%2C%20Services%20Announcement',
+      'https://www.globenewswire.com/RssFeed/subjectcode/86-Management%20Changes/feedTitle/GlobeNewswire%20-%20Management%20Changes',
+      'https://www.prnewswire.com/rss/news-releases-list.rss',
     ];
     const urls = NEWS_FEEDS.map((feed) => feed.url);
     for (const expected of expectedUrls) {

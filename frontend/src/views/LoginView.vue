@@ -41,8 +41,8 @@
       <aside class="auth-console">
         <div class="auth-console-header">
           <div>
-            <p>{{ mode === 'login' ? 'Secure access' : 'Operator enrollment' }}</p>
-            <h2>{{ mode === 'login' ? 'Sign in' : 'Create account' }}</h2>
+            <p>Secure access</p>
+            <h2>Sign in</h2>
           </div>
           <span class="auth-status">BMCL online</span>
         </div>
@@ -74,14 +74,12 @@
           <div v-if="error" class="auth-error">{{ error }}</div>
 
           <GlassButton type="submit" :disabled="loading" class="auth-submit">
-            <v-icon :icon="mode === 'login' ? 'mdi-login' : 'mdi-account-plus-outline'" size="18" />
-            <span>{{ loading ? 'Working...' : mode === 'login' ? 'Sign in' : 'Create account' }}</span>
+            <v-icon icon="mdi-login" size="18" />
+            <span>{{ loading ? 'Working...' : 'Sign in' }}</span>
           </GlassButton>
         </form>
 
-        <button class="auth-mode-toggle" type="button" @click="toggleMode">
-          {{ mode === 'login' ? "Need an account? Register" : 'Already have an account? Sign in' }}
-        </button>
+        <router-link class="auth-mode-toggle" to="/">View platform overview</router-link>
       </aside>
     </section>
   </div>
@@ -97,7 +95,6 @@ const email = ref('');
 const password = ref('');
 const error = ref('');
 const loading = ref(false);
-const mode = ref('login');
 
 const auth = useAuthStore();
 const router = useRouter();
@@ -107,22 +104,13 @@ async function submit() {
   error.value = '';
   loading.value = true;
   try {
-    if (mode.value === 'login') {
-      await auth.login(email.value, password.value);
-    } else {
-      await auth.register(email.value, password.value);
-    }
+    await auth.login(email.value, password.value);
     router.push(route.query.redirect || { name: 'dashboard' });
   } catch (err) {
     error.value = err.response?.data?.error || 'Something went wrong';
   } finally {
     loading.value = false;
   }
-}
-
-function toggleMode() {
-  mode.value = mode.value === 'login' ? 'register' : 'login';
-  error.value = '';
 }
 </script>
 

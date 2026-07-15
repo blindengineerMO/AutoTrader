@@ -1,15 +1,16 @@
+const { resilientFetch } = require('../../utils/resilientFetch');
 const logger = require('../../utils/logger');
 
 async function getYahooQuote(symbol) {
   const url = new URL('https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol));
   url.searchParams.set('range', '5d');
   url.searchParams.set('interval', '1d');
-  const res = await fetch(url.toString(), {
+  const res = await resilientFetch(url.toString(), {
     headers: {
       'User-Agent': 'Mozilla/5.0 AutoTrader research bot',
       Accept: 'application/json,text/plain,*/*',
     },
-  });
+  }, { bucket: 'yahoo' });
   if (!res.ok) throw new Error(`Yahoo chart scrape failed: ${res.status}`);
   const data = await res.json();
   const result = data.chart?.result?.[0];
@@ -38,12 +39,12 @@ async function getYahooHistory(symbol, range = '5y', interval = '1mo') {
   url.searchParams.set('range', range);
   url.searchParams.set('interval', interval);
   url.searchParams.set('events', 'split');
-  const res = await fetch(url.toString(), {
+  const res = await resilientFetch(url.toString(), {
     headers: {
       'User-Agent': 'Mozilla/5.0 AutoTrader research bot',
       Accept: 'application/json,text/plain,*/*',
     },
-  });
+  }, { bucket: 'yahoo' });
   if (!res.ok) throw new Error(`Yahoo historical scrape failed: ${res.status}`);
   const data = await res.json();
   const result = data.chart?.result?.[0];
@@ -96,12 +97,12 @@ async function getYahooDailyCloses(symbol, range = '2y') {
   const url = new URL('https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol));
   url.searchParams.set('range', range);
   url.searchParams.set('interval', '1d');
-  const res = await fetch(url.toString(), {
+  const res = await resilientFetch(url.toString(), {
     headers: {
       'User-Agent': 'Mozilla/5.0 AutoTrader research bot',
       Accept: 'application/json,text/plain,*/*',
     },
-  });
+  }, { bucket: 'yahoo' });
   if (!res.ok) throw new Error(`Yahoo daily closes scrape failed: ${res.status}`);
   const data = await res.json();
   const result = data.chart?.result?.[0];
@@ -114,9 +115,9 @@ async function getYahooDailyCloses(symbol, range = '2y') {
 async function getStooqQuote(symbol) {
   const normalized = symbol.includes('.') ? symbol.toLowerCase() : `${symbol.toLowerCase()}.us`;
   const url = `https://stooq.com/q/l/?s=${encodeURIComponent(normalized)}&f=sd2t2ohlcv&h&e=csv`;
-  const res = await fetch(url, {
+  const res = await resilientFetch(url, {
     headers: { 'User-Agent': 'Mozilla/5.0 AutoTrader research bot', Accept: 'text/csv,*/*' },
-  });
+  }, { bucket: 'stooq' });
   if (!res.ok) throw new Error(`Stooq scrape failed: ${res.status}`);
   const text = await res.text();
   const [header, row] = text.trim().split(/\r?\n/);

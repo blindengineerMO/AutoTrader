@@ -161,6 +161,12 @@ async function runSafeResearchMvp({
   });
   specRepo.audit({ userId, runId, eventType: 'completed', entityType: 'safe_research_mvp', entityId: runId, payload: output });
   tell({ userId, runId, conv: conversation.id, op: 'safe_mvp.completed', body: { runId, portfolioTargets: output.portfolio.length, rejectedTrades: output.rejected_trades.length } });
+  brainMesh.completeConversation(conversation.id, userId, {
+    completedBy: 'brain.spec.safe-research',
+    completedOp: 'safe_mvp.completed',
+    completedAt: new Date().toISOString(),
+    runId,
+  });
   emit(onEvent, 'safe-mvp-complete', 100, 'info', 'SPEC safe research MVP completed.', {
     runId,
     portfolioTargets: output.portfolio.length,

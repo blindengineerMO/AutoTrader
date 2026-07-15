@@ -12,7 +12,16 @@ const countRecentForSymbol = db.prepare(`
   SELECT COUNT(*) AS n FROM orders
   WHERE user_id = ? AND symbol = ? AND submitted_at >= datetime('now', '-24 hours')
 `);
+const countSinceStmt = db.prepare(`
+  SELECT COUNT(*) AS n FROM orders
+  WHERE user_id = ? AND submitted_at >= ?
+`);
 const listByUser = db.prepare('SELECT * FROM orders WHERE user_id = ? ORDER BY submitted_at DESC LIMIT ?');
+const listFilledSinceStmt = db.prepare(`
+  SELECT symbol, side, filled_at FROM orders
+  WHERE user_id = ? AND status = 'filled' AND filled_at >= ?
+  ORDER BY filled_at ASC
+`);
 const listFilledSimulationByUser = db.prepare(`
   SELECT * FROM orders
   WHERE user_id = ? AND order_type = 'simulated_market' AND status = 'filled'
@@ -30,7 +39,9 @@ module.exports = {
   markFilled: (id, fillPrice) => markFilled.run(fillPrice, id),
   markFailed: (id) => markFailed.run(id),
   countRecentForSymbol: (userId, symbol) => countRecentForSymbol.get(userId, symbol).n,
+  countSince: (userId, sinceIso) => countSinceStmt.get(userId, sinceIso).n,
   listByUser: (userId, limit = 50) => listByUser.all(userId, limit),
+  listFilledSince: (userId, sinceIso) => listFilledSinceStmt.all(userId, sinceIso),
   listFilledSimulationByUser: (userId) => listFilledSimulationByUser.all(userId),
   getById: (id) => getById.get(id),
 };

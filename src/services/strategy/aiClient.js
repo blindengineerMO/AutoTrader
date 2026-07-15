@@ -2,6 +2,8 @@ const OpenAI = require('openai');
 const { config } = require('../../config');
 const providerCredentialRepo = require('../../db/repositories/providerCredentialRepo');
 const ollamaClient = require('../ollamaClient');
+const alpacaRules = require('../alpacaRulesService');
+const crossSourceAgreement = require('../crossSourceAgreementService');
 const logger = require('../../utils/logger');
 
 const TOKEN_CHAR_RATIO = 4;
@@ -16,7 +18,12 @@ local brain.js opportunity scores, and source evidence. Use that full context.
 Hard constraints you must respect:
 - Never propose more than 3 trades for the same symbol.
 - Never propose spending more than the account's available cash.
+- Never propose a buy whose estimated notional exceeds the configured max buy per order; this applies equally to whole-share and fractional-share orders.
+- Fractional Alpaca orders are allowed only when fractional trading is enabled, the supplied Alpaca asset metadata has fractionable=true, and quantity uses 9 or fewer decimal places.
+- Do not use notional orders. Use quantity only, and never propose a fractional short sale.
+- Always review every current owned position in the supplied positions list and include an action for it: buy more using action "buy", hold using action "hold", or sell using action "sell".
 - Prefer capital preservation over speculative swings when signals are weak or conflicting.
+- A buy/sell proposal needs cross-source agreement. New buys require at least 3 independent evidence lanes; sells require at least 2. If fewer lanes agree, choose HOLD and explain what evidence is missing.
 - Every action must include a concise, concrete rationale referencing the data you were given.
 - If local AI scores and macro/news evidence conflict, explain the conflict and prefer HOLD unless quote momentum confirms the thesis.
 
@@ -102,7 +109,9 @@ async function requestStructuredCompletion({ providers, systemPrompt, userPrompt
   return null;
 }
 
-function generateRulesBasedPlan({ researchSnapshot, accountState, recentTradeCounts, reason }) {
+function generateRulesBasedPlan({ userId, researchSnapshot, accountState, recentTradeCounts, positions = [], reason }) {
+  const alpacaRuleSummary = alpacaRules.getRulesSummary({ userId });
+  const positionSymbols = new Set((positions || []).map((position) => cleanSymbol(position.symbol)).filter(Boolean));
   const ranked = [...researchSnapshot.signals].sort((a, b) => {
     const aScore = a.localAiScore ?? (a.changePct || 0) - Math.abs(a.volatilityPct || 0) * 0.15;
     const bScore = b.localAiScore ?? (b.changePct || 0) - Math.abs(b.volatilityPct || 0) * 0.15;
@@ -110,6 +119,7 @@ function generateRulesBasedPlan({ researchSnapshot, accountState, recentTradeCou
   });
   const actions = ranked.slice(0, 5).map((signal, index) => {
     const tradeCount = recentTradeCounts?.[signal.symbol] || 0;
+    const ownedPosition = (positions || []).find((position) => cleanSymbol(position.symbol) === cleanSymbol(signal.symbol));
     if (tradeCount >= 3) {
       return {
         symbol: signal.symbol,
@@ -119,21 +129,40 @@ function generateRulesBasedPlan({ researchSnapshot, accountState, recentTradeCou
       };
     }
     const strongLocalScore = signal.localAiScore === undefined || signal.localAiScore >= 66;
-    if (index === 0 && strongLocalScore && signal.momentum === 'bullish' && (accountState.buyingPowerUsd || accountState.cashUsd || 0) >= signal.price) {
+    if (ownedPosition && signal.actionBias === 'sell-or-avoid') {
+      return {
+        symbol: signal.symbol,
+        action: 'sell',
+        quantity: Number(ownedPosition.quantity || 0) || null,
+        rationale: `${signal.symbol} is an owned position and the current research bias is sell-or-avoid with local score ${signal.localAiScore ?? 'n/a'}; board review recommends selling the held quantity.`,
+      };
+    }
+    const buyQuantity = selectBuyQuantity({ signal, accountState, alpacaRuleSummary });
+    if (index === 0 && strongLocalScore && signal.momentum === 'bullish' && buyQuantity) {
       return {
         symbol: signal.symbol,
         action: 'buy',
-        quantity: 1,
-        rationale: `${signal.symbol} leads the autonomous research ranking with ${signal.changePct}% change, ${signal.volatilityPct}% intraday range, and local score ${signal.localAiScore ?? 'n/a'}.`,
+        quantity: buyQuantity,
+        rationale: `${signal.symbol} ${ownedPosition ? 'is already owned and merits buying more because it' : 'leads the autonomous research ranking and'} has ${signal.changePct}% change, ${signal.volatilityPct}% intraday range, and local score ${signal.localAiScore ?? 'n/a'}; quantity respects Alpaca fractional rules and the max buy per order limit.`,
       };
     }
     return {
       symbol: signal.symbol,
       action: 'hold',
       quantity: null,
-      rationale: `${signal.symbol} is ${signal.momentum} with ${signal.changePct}% change and local score ${signal.localAiScore ?? 'n/a'}; signal strength does not justify execution.`,
+      rationale: `${signal.symbol} ${ownedPosition ? 'is an owned position to hold' : 'is held'} with ${signal.momentum} momentum, ${signal.changePct}% change, and local score ${signal.localAiScore ?? 'n/a'}; signal strength does not justify execution.`,
     };
   });
+  for (const position of positions || []) {
+    const symbol = cleanSymbol(position.symbol);
+    if (!symbol || actions.some((action) => cleanSymbol(action.symbol) === symbol)) continue;
+    actions.push({
+      symbol,
+      action: 'hold',
+      quantity: null,
+      rationale: `${symbol} is a current owned position (${position.quantity} shares at average cost $${Number(position.avg_cost_usd || 0).toFixed(2)}). No fresh ranked signal was attached, so the board keeps it on HOLD pending refreshed research.`,
+    });
+  }
 
   return {
     modelUsed: 'rules:fallback',
@@ -146,9 +175,9 @@ function generateRulesBasedPlan({ researchSnapshot, accountState, recentTradeCou
   };
 }
 
-async function generateTradingPlan({ userId, researchSnapshot, accountState, recentTradeCounts, onEvent = () => {} }) {
+async function generateTradingPlan({ userId, researchSnapshot, accountState, recentTradeCounts, positions = [], onEvent = () => {} }) {
   const providers = buildProviders(userId);
-  const userPrompt = buildTradingPlanPrompt({ researchSnapshot, accountState, recentTradeCounts });
+  const userPrompt = buildTradingPlanPrompt({ userId, researchSnapshot, accountState, recentTradeCounts, positions });
 
   if (!providers.length) {
     emit(onEvent, 'strategy', 85, 'warn', 'No AI credentials available; using transparent rules-based strategy fallback.');
@@ -156,6 +185,7 @@ async function generateTradingPlan({ userId, researchSnapshot, accountState, rec
       researchSnapshot,
       accountState,
       recentTradeCounts,
+      positions,
       reason: 'No AI provider credentials were configured, so the system generated a transparent rules-based simulation plan.',
     });
   }
@@ -175,25 +205,62 @@ async function generateTradingPlan({ userId, researchSnapshot, accountState, rec
     researchSnapshot,
     accountState,
     recentTradeCounts,
+    positions,
     reason: 'All AI providers failed or had no credits, so the system generated a transparent rules-based fallback plan.',
   });
 }
 
-function buildTradingPlanPrompt({ researchSnapshot = {}, accountState = {}, recentTradeCounts = {} } = {}) {
+function buildTradingPlanPrompt({ userId, researchSnapshot = {}, accountState = {}, recentTradeCounts = {}, positions = [] } = {}) {
   const summary = researchSnapshot.summary || {};
+  const signalBySymbol = new Map((researchSnapshot.signals || []).map((signal) => [cleanSymbol(signal.symbol), signal]));
   const context = {
     instructions: 'Use this compact strategy context. The full crawl/source archive was intentionally summarized to fit the local model context.',
+    positionInstructions: 'For every current position, include an action in the final JSON. Use action "buy" when buying more, "hold" when retaining, and "sell" when exiting/reducing. The rationale must say this is a current owned position review.',
+    crossSourceAgreementRules: {
+      buyRequiredIndependentLanes: crossSourceAgreement.BUY_REQUIRED_AGREEMENTS,
+      sellRequiredIndependentLanes: crossSourceAgreement.SELL_REQUIRED_AGREEMENTS,
+      instruction: 'Do not propose buy/sell unless the compact signal crossSourceAgreement for that direction passes. Use hold when agreement is insufficient.',
+    },
+    alpacaOrderRules: alpacaRules.getRulesSummary({ userId }),
     snapshot: {
       id: researchSnapshot.id || null,
       source: researchSnapshot.source || null,
       createdAt: researchSnapshot.created_at || researchSnapshot.createdAt || null,
     },
     accountState: compactObject(accountState, 1600),
+    positions: compactPositions(positions, signalBySymbol),
     recentTradeCounts,
-    signals: compactSignals(researchSnapshot.signals || []),
+    signals: compactSignals(researchSnapshot.signals || [], summary),
     researchSummary: compactResearchSummary(summary),
   };
   return fitJsonToTokenBudget(context, Math.max(512, config.ollamaMaxPromptTokens - estimateTokens(SYSTEM_PROMPT) - STRATEGY_PROMPT_SAFETY_TOKENS));
+}
+
+function compactPositions(positions = [], signalBySymbol = new Map()) {
+  return (positions || []).slice(0, 25).map((position) => {
+    const symbol = cleanSymbol(position.symbol);
+    const signal = signalBySymbol.get(symbol);
+    const avgCost = Number(position.avg_cost_usd || 0);
+    const currentPrice = Number(signal?.price || signal?.evidence?.quote?.current || avgCost || 0);
+    const quantity = Number(position.quantity || 0);
+    return {
+      symbol,
+      quantity,
+      avgCostUsd: avgCost,
+      currentResearchPriceUsd: currentPrice,
+      costBasisUsd: Number((quantity * avgCost).toFixed(2)),
+      marketValueUsd: Number((quantity * currentPrice).toFixed(2)),
+      unrealizedPnlPct: avgCost > 0 && currentPrice > 0 ? Number((((currentPrice - avgCost) / avgCost) * 100).toFixed(2)) : null,
+      researchSignal: signal ? {
+        localAiScore: signal.localAiScore,
+        actionBias: signal.actionBias,
+        momentum: signal.momentum,
+        changePct: signal.changePct,
+        theme: signal.theme,
+        topReasons: normalizeShortStrings(signal.evidence?.explanation || [], 3, 180),
+      } : null,
+    };
+  });
 }
 
 function preparePromptForProvider({ provider, systemPrompt, userPrompt, onEvent = () => {} }) {
@@ -220,7 +287,7 @@ function preparePromptForProvider({ provider, systemPrompt, userPrompt, onEvent 
   }
 }
 
-function compactSignals(signals) {
+function compactSignals(signals, researchSummary = {}) {
   return [...signals]
     .sort((a, b) => (b.localAiScore ?? 0) - (a.localAiScore ?? 0))
     .slice(0, 12)
@@ -235,8 +302,41 @@ function compactSignals(signals) {
       actionBias: signal.actionBias,
       financialEventScore: signal.financialEventScore,
       theme: signal.theme,
+      alpacaAsset: compactAlpacaAsset(signal.alpacaAsset || signal.evidence?.alpacaAsset),
+      crossSourceAgreement: {
+        buy: crossSourceAgreement.evaluateSignalAgreement({ action: 'buy', signal, researchSummary }),
+        sell: crossSourceAgreement.evaluateSignalAgreement({ action: 'sell', signal, researchSummary }),
+      },
       evidence: compactSignalEvidence(signal.evidence),
     }));
+}
+
+function selectBuyQuantity({ signal, accountState, alpacaRuleSummary }) {
+  const price = Number(signal?.price || 0);
+  if (!Number.isFinite(price) || price <= 0) return null;
+  const buyingPower = Number(accountState?.buyingPowerUsd || accountState?.cashUsd || 0);
+  const maxNotional = Math.min(buyingPower, Number(alpacaRuleSummary?.maxBuyOrderNotionalUsd || 100));
+  if (maxNotional <= 0) return null;
+  if (price <= maxNotional) return 1;
+
+  const asset = signal?.alpacaAsset || signal?.evidence?.alpacaAsset || {};
+  const canFractional = alpacaRuleSummary?.fractionalTradingEnabled && asset.fractionable === true;
+  if (!canFractional || maxNotional < Number(alpacaRuleSummary?.fractionalMinNotionalUsd || 1)) return null;
+  const quantity = alpacaRules.roundQuantity(maxNotional / price);
+  return quantity > 0 ? quantity : null;
+}
+
+function compactAlpacaAsset(asset = {}) {
+  if (!asset || typeof asset !== 'object') return null;
+  return {
+    id: asset.id,
+    symbol: asset.symbol,
+    name: asset.name,
+    exchange: asset.exchange,
+    status: asset.status,
+    tradable: asset.tradable,
+    fractionable: asset.fractionable,
+  };
 }
 
 function compactSignalEvidence(evidence = {}) {
@@ -363,6 +463,19 @@ function fitJsonToTokenBudget(value, maxTokens) {
     warning: 'Strategy context was aggressively compacted to fit local model context.',
     signals: current.signals,
     accountState: current.accountState,
+    positions: (current.positions || []).slice(0, 25).map((position) => ({
+      symbol: position.symbol,
+      quantity: position.quantity,
+      avgCostUsd: position.avgCostUsd,
+      currentResearchPriceUsd: position.currentResearchPriceUsd,
+      unrealizedPnlPct: position.unrealizedPnlPct,
+      researchSignal: position.researchSignal ? {
+        localAiScore: position.researchSignal.localAiScore,
+        actionBias: position.researchSignal.actionBias,
+      } : null,
+    })),
+    positionInstructions: current.positionInstructions,
+    alpacaOrderRules: current.alpacaOrderRules,
     recentTradeCounts: current.recentTradeCounts,
     narrativeSummary: cleanText(current.researchSummary?.narrativeSummary).slice(0, Math.max(200, maxTokens * TOKEN_CHAR_RATIO - 2200)),
   });
@@ -382,6 +495,10 @@ function normalizeShortStrings(items, limit, maxChars) {
 
 function cleanText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function cleanSymbol(value) {
+  return String(value || '').trim().toUpperCase();
 }
 
 function estimatePromptTokens(systemPrompt, userPrompt) {

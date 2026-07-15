@@ -8,7 +8,7 @@ const planActionSchema = z.object({
 });
 
 const tradingPlanSchema = z.object({
-  actions: z.array(planActionSchema).max(10),
+  actions: z.array(planActionSchema).max(50),
   overallRationale: z.string().min(1).max(1000),
 });
 

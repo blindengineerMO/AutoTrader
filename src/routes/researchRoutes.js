@@ -7,10 +7,13 @@ const evaluationReportRepo = require('../db/repositories/evaluationReportRepo');
 const specRepo = require('../db/repositories/specResearchRepo');
 const specBacktestRepo = require('../db/repositories/specBacktestRepo');
 const specOperationsRepo = require('../db/repositories/specOperationsRepo');
+const eventTrainingLabelRepo = require('../db/repositories/eventTrainingLabelRepo');
+const challengerScorerService = require('../services/challengerScorerService');
 const researchService = require('../services/researchService');
 const autonomousResearchService = require('../services/autonomousResearchService');
 const evaluationService = require('../services/evaluationService');
 const forecastService = require('../services/forecastService');
+const alpacaDocumentService = require('../services/alpacaDocumentService');
 const safeResearchMvpService = require('../services/spec/safeResearchMvpService');
 const modelPromotionService = require('../services/spec/modelPromotionService');
 const { runTradingCycle } = require('../services/tradingCycle');
@@ -41,6 +44,37 @@ router.get('/evaluations', (req, res) => {
   res.json(evaluationReportRepo.listByUser(req.user.id, limit));
 });
 
+router.get('/alpaca-documents', (req, res) => {
+  res.json(alpacaDocumentService.queryDocuments(req.user.id, {
+    page: Number(req.query.page) || 1,
+    pageSize: Number(req.query.pageSize) || 5,
+    search: req.query.search || '',
+    documentType: req.query.documentType || '',
+    sortBy: req.query.sortBy || 'document_date',
+    sortDir: req.query.sortDir || 'desc',
+  }));
+});
+
+router.post('/alpaca-documents/sync', async (req, res) => {
+  try {
+    res.json(await alpacaDocumentService.syncMonthlyDocuments(req.user.id));
+  } catch (err) {
+    logger.error('Manual Alpaca document sync failed', { userId: req.user.id, error: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/alpaca-documents/:id/download', async (req, res) => {
+  try {
+    const document = await alpacaDocumentService.refreshDownloadLink(req.user.id, Number(req.params.id));
+    if (!document) return res.status(404).json({ error: 'Alpaca document not found' });
+    res.json({ url: document.download_url, document });
+  } catch (err) {
+    logger.warn('Alpaca document download failed', { userId: req.user.id, id: req.params.id, error: err.message });
+    res.status(400).json({ error: err.message });
+  }
+});
+
 router.get('/forecast/:symbol', async (req, res) => {
   try {
     const forecast = await forecastService.getForecast(req.user.id, req.params.symbol.toUpperCase());
@@ -49,6 +83,16 @@ router.get('/forecast/:symbol', async (req, res) => {
     logger.error('Forecast generation failed', { userId: req.user.id, symbol: req.params.symbol, error: err.message });
     res.status(500).json({ error: err.message });
   }
+});
+
+router.get('/event-labels', (req, res) => {
+  const limit = Number(req.query.limit) || 50;
+  res.json({
+    recent: eventTrainingLabelRepo.listRecent(req.user.id, limit),
+    accuracyByCategory: eventTrainingLabelRepo.accuracyByCategory(req.user.id),
+    categoryLearning: eventTrainingLabelRepo.listCategoryLearning(req.user.id),
+    challenger: challengerScorerService.getChallengerStatus(req.user.id),
+  });
 });
 
 router.get('/spec-monitoring', (req, res) => {

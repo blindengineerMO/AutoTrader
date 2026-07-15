@@ -8,7 +8,7 @@ class BrokerClient {
     throw new Error('connect() not implemented');
   }
 
-  /** @returns {Promise<{cashUsd: number, buyingPowerUsd: number}>} */
+  /** @returns {Promise<{cashUsd: number, buyingPowerUsd: number, equityUsd: number|null}>} */
   async getAccountState() {
     throw new Error('getAccountState() not implemented');
   }

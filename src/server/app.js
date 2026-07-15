@@ -7,15 +7,18 @@ const requireAuth = require('../middleware/auth');
 const { getTradingReadiness } = require('../config');
 
 const authRoutes = require('../routes/authRoutes');
+const publicRoutes = require('../routes/publicRoutes');
 const dashboardRoutes = require('../routes/dashboardRoutes');
 const researchRoutes = require('../routes/researchRoutes');
 const orderRoutes = require('../routes/orderRoutes');
 const settingsRoutes = require('../routes/settingsRoutes');
 const companyRoutes = require('../routes/companyRoutes');
 const brainMeshRoutes = require('../routes/brainMeshRoutes');
+const brainMeshNodeRoutes = require('../routes/brainMeshNodeRoutes');
 const agentRoutes = require('../routes/agentRoutes');
 const watcherAgentRoutes = require('../routes/watcherAgentRoutes');
 const adminRoutes = require('../routes/adminRoutes');
+const simulationFundingRoutes = require('../routes/simulationFundingRoutes');
 
 function createApp() {
   const app = express();
@@ -33,12 +36,15 @@ function createApp() {
   });
 
   app.use('/api/auth', authRoutes);
+  app.use('/api/public', publicRoutes);
   app.use('/api/dashboard', requireAuth, dashboardRoutes);
   app.use('/api/research', requireAuth, researchRoutes);
   app.use('/api/orders', requireAuth, orderRoutes);
+  app.use('/api/simulation-funding', requireAuth, simulationFundingRoutes);
   app.use('/api/settings', requireAuth, settingsRoutes);
   app.use('/api/companies', requireAuth, companyRoutes);
   app.use('/api/brain-mesh', requireAuth, brainMeshRoutes);
+app.use('/api/brain-mesh/nodes', requireAuth, brainMeshNodeRoutes);
   app.use('/api/agents', requireAuth, agentRoutes);
   app.use('/api/watcher-agents', requireAuth, watcherAgentRoutes);
   app.use('/api/admin', requireAuth, adminRoutes);

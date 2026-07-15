@@ -31,6 +31,19 @@ describe('aiClient.generateRulesBasedPlan (deterministic no-AI-credentials fallb
     expect(plan.raw.actions[0].action).toBe('hold');
   });
 
+  it('uses fractional quantity when cash is below share price and Alpaca marks the asset fractionable', () => {
+    const plan = generateRulesBasedPlan({
+      researchSnapshot: { signals: [signal({ price: 200, alpacaAsset: { tradable: true, fractionable: true } })] },
+      accountState: { cashUsd: 50 },
+      recentTradeCounts: {},
+    });
+    expect(plan.raw.actions[0]).toMatchObject({
+      symbol: 'AAPL',
+      action: 'buy',
+      quantity: 0.25,
+    });
+  });
+
   it('holds a symbol that already has 3+ trades in the last 24h regardless of signal strength', () => {
     const plan = generateRulesBasedPlan({
       researchSnapshot: { signals: [signal()] },
@@ -75,14 +88,38 @@ describe('aiClient.generateRulesBasedPlan (deterministic no-AI-credentials fallb
     expect(buys[0].symbol).toBe('AAPL');
   });
 
-  it('caps proposed actions at 5 even with a larger signal set', () => {
+  it('caps fresh signal actions at 5 but still appends current owned-position holds', () => {
     const signals = Array.from({ length: 8 }, (_, i) => signal({ symbol: `SYM${i}`, localAiScore: 50 + i }));
     const plan = generateRulesBasedPlan({
       researchSnapshot: { signals },
       accountState: { cashUsd: 1000 },
       recentTradeCounts: {},
+      positions: [{ symbol: 'HELD', quantity: 3, avg_cost_usd: 12 }],
     });
-    expect(plan.raw.actions).toHaveLength(5);
+    expect(plan.raw.actions).toHaveLength(6);
+    expect(plan.raw.actions.find((action) => action.symbol === 'HELD')).toMatchObject({
+      action: 'hold',
+      rationale: expect.stringMatching(/current owned position/i),
+    });
+  });
+
+  it('reviews owned positions as sell or buy-more candidates when matching research signals exist', () => {
+    const plan = generateRulesBasedPlan({
+      researchSnapshot: {
+        signals: [
+          signal({ symbol: 'F', actionBias: 'sell-or-avoid', localAiScore: 30, momentum: 'bearish', price: 13 }),
+          signal({ symbol: 'NVDA', localAiScore: 95, price: 100 }),
+        ],
+      },
+      accountState: { cashUsd: 1000 },
+      recentTradeCounts: {},
+      positions: [{ symbol: 'F', quantity: 2, avg_cost_usd: 14 }],
+    });
+    expect(plan.raw.actions.find((action) => action.symbol === 'F')).toMatchObject({
+      action: 'sell',
+      quantity: 2,
+      rationale: expect.stringMatching(/owned position/i),
+    });
   });
 
   it('includes the provided reason in overallRationale when given', () => {
@@ -141,11 +178,15 @@ describe('aiClient local-model context compaction', () => {
         },
       },
       accountState: { cashUsd: 100 },
+      positions: [{ symbol: 'NVDA', quantity: 2, avg_cost_usd: 80 }],
       recentTradeCounts: {},
     });
 
     expect(estimatePromptTokens('', prompt)).toBeLessThanOrEqual(1400);
     expect(prompt).toContain('NVDA');
+    expect(prompt).toContain('positions');
+    expect(prompt).toContain('positionInstructions');
+    expect(prompt).toContain('alpacaOrderRules');
     expect(prompt.length).toBeLessThan(5600);
     expect(prompt).not.toContain('learnedResearch');
   });

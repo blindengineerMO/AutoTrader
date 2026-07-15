@@ -1,15 +1,18 @@
 const db = require('../connection');
 
 const upsertAgentStmt = db.prepare(`
-  INSERT INTO watcher_agents (user_id, symbol, company_name, brain_id, price_tier, status, last_researched_at)
-  VALUES (@userId, @symbol, @companyName, @brainId, @priceTier, @status, @lastResearchedAt)
+  INSERT INTO watcher_agents (user_id, symbol, company_name, brain_id, price_tier, status, last_researched_at, theme)
+  VALUES (@userId, @symbol, @companyName, @brainId, @priceTier, @status, @lastResearchedAt, @theme)
   ON CONFLICT(user_id, symbol) DO UPDATE SET
     company_name = COALESCE(excluded.company_name, watcher_agents.company_name),
     brain_id = excluded.brain_id,
     price_tier = excluded.price_tier,
     status = excluded.status,
+    theme = CASE WHEN excluded.theme != 'general' THEN excluded.theme ELSE watcher_agents.theme END,
     updated_at = datetime('now')
 `);
+
+const updateLearningWeightStmt = db.prepare("UPDATE watcher_agents SET learning_weight = ?, updated_at = datetime('now') WHERE id = ?");
 
 const getByIdStmt = db.prepare('SELECT * FROM watcher_agents WHERE user_id = ? AND id = ?');
 const getBySymbolStmt = db.prepare('SELECT * FROM watcher_agents WHERE user_id = ? AND symbol = ?');
@@ -22,6 +25,12 @@ const insertResearchRunStmt = db.prepare(`
     watcher_agent_id, user_id, symbol, price_at_research, predicted_action, local_ai_score, rationale_json
   )
   VALUES (@watcherAgentId, @userId, @symbol, @priceAtResearch, @predictedAction, @localAiScore, @rationaleJson)
+`);
+const insertResearchRunAtStmt = db.prepare(`
+  INSERT INTO watcher_agent_research_runs (
+    watcher_agent_id, user_id, symbol, run_at, price_at_research, predicted_action, local_ai_score, rationale_json
+  )
+  VALUES (@watcherAgentId, @userId, @symbol, @runAt, @priceAtResearch, @predictedAction, @localAiScore, @rationaleJson)
 `);
 
 const getResearchRunStmt = db.prepare('SELECT * FROM watcher_agent_research_runs WHERE id = ?');
@@ -59,8 +68,13 @@ function upsertAgent(agent) {
     priceTier: agent.priceTier || 'standard',
     status: agent.status || 'active',
     lastResearchedAt: agent.lastResearchedAt || null,
+    theme: agent.theme || 'general',
   });
   return getBySymbol(agent.userId, agent.symbol);
+}
+
+function updateLearningWeight(watcherAgentId, weight) {
+  updateLearningWeightStmt.run(weight, watcherAgentId);
 }
 
 function getById(userId, id) {
@@ -80,10 +94,12 @@ function touchResearched(watcherAgentId) {
 }
 
 function recordResearchRun(run) {
-  const { lastInsertRowid } = insertResearchRunStmt.run({
+  const stmt = run.runAt ? insertResearchRunAtStmt : insertResearchRunStmt;
+  const { lastInsertRowid } = stmt.run({
     watcherAgentId: run.watcherAgentId,
     userId: run.userId,
     symbol: run.symbol,
+    runAt: run.runAt,
     priceAtResearch: run.priceAtResearch,
     predictedAction: run.predictedAction,
     localAiScore: run.localAiScore,
@@ -172,6 +188,7 @@ function deserializeRun(row) {
 
 module.exports = {
   upsertAgent,
+  updateLearningWeight,
   getById,
   getBySymbol,
   listActiveByUser,

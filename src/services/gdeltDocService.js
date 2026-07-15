@@ -1,3 +1,4 @@
+const { resilientFetch } = require('../utils/resilientFetch');
 const { config } = require('../config');
 const providerCredentialRepo = require('../db/repositories/providerCredentialRepo');
 
@@ -251,13 +252,13 @@ async function fetchWithTimeout(url, timeoutMs) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, {
+    return await resilientFetch(url, {
       signal: controller.signal,
       headers: {
         Accept: 'application/json,text/plain,*/*',
         'User-Agent': 'Mozilla/5.0 AutoTrader GDELT DOC research bot',
       },
-    });
+    }, { bucket: 'gdelt', timeoutMs: 0 });
   } finally {
     clearTimeout(timeout);
   }

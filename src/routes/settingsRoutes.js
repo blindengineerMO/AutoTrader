@@ -11,9 +11,18 @@ const timeSettings = require('../services/timeSettingsService');
 
 const router = express.Router();
 
+const dashboardWidgetSchema = z.object({
+  i: z.string(),
+  x: z.number(),
+  y: z.number(),
+  w: z.number(),
+  h: z.number(),
+});
+
 const settingsPatchSchema = z.object({
   dailyLossLimitUsd: z.number().positive().optional(),
   maxTradesPerSymbolPer24h: z.number().int().positive().max(10).optional(),
+  dayTradingEnabled: z.boolean().optional(),
   researchCadenceCron: z.string().optional(),
   evaluationCadenceCron: z.string().optional(),
   sourceLearningEnabled: z.boolean().optional(),
@@ -25,17 +34,39 @@ const settingsPatchSchema = z.object({
   tradingEndTime: z.string().refine(timeSettings.isValidTime, 'Trading end time must be HH:mm').optional(),
   simulationModeEnabled: z.boolean().optional(),
   simulationStartingCashUsd: z.number().positive().max(100000000).optional(),
+  fractionalTradingEnabled: z.boolean().optional(),
+  fractionalMinNotionalUsd: z.number().positive().max(1000000).optional(),
+  maxBuyOrderNotionalUsd: z.number().positive().max(100000000).optional(),
+  alpacaStatementDownloadDay: z.number().int().min(1).max(28).optional(),
   agentPersonalityRefreshEnabled: z.boolean().optional(),
   agentPersonalityRefreshTime: z.string().refine(timeSettings.isValidTime, 'Agent refresh time must be HH:mm').optional(),
   personalityTickCadenceCron: z.string().optional(),
   agentLocalLearningEnabled: z.boolean().optional(),
-  dashboardLayout: z.record(z.array(z.object({
-    i: z.string(),
-    x: z.number(),
-    y: z.number(),
-    w: z.number(),
-    h: z.number(),
-  }))).optional(),
+  excludedSymbols: z.array(z.object({
+    symbol: z.string().min(1).max(16),
+    companyName: z.string().max(200).optional(),
+    reason: z.string().max(500).optional(),
+    source: z.string().max(120).optional(),
+    addedAt: z.string().max(80).optional(),
+    assetStatus: z.string().max(80).optional(),
+    exchange: z.string().max(80).optional(),
+  })).optional(),
+  dashboardLayout: z.union([
+    z.object({
+      dashboardVersion: z.number().int().positive().optional(),
+      dashboard: z.array(dashboardWidgetSchema),
+    }),
+    z.record(z.array(dashboardWidgetSchema)),
+  ]).optional(),
+});
+
+const excludedSymbolSchema = z.object({
+  symbol: z.string().min(1).max(16),
+  companyName: z.string().max(200).optional(),
+  reason: z.string().max(500).optional(),
+  source: z.string().max(120).optional(),
+  assetStatus: z.string().max(80).optional(),
+  exchange: z.string().max(80).optional(),
 });
 
 const sourceSchema = z.object({
@@ -64,10 +95,11 @@ router.get('/', (req, res) => {
 });
 
 router.get('/providers', (req, res) => {
-  res.json(providerConfigService.listProviders(req.user.id));
+  res.json(providerConfigService.listProviders(req.user.id, { isAdmin: req.user.isAdmin }));
 });
 
 router.get('/research-sources', (req, res) => {
+  if (!req.user.isAdmin) return res.status(403).json({ error: 'Admin access required' });
   sourceLearning.seedSources(req.user.id);
   const parsed = sourceQuerySchema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid source query' });
@@ -75,6 +107,7 @@ router.get('/research-sources', (req, res) => {
 });
 
 router.post('/research-sources', (req, res) => {
+  if (!req.user.isAdmin) return res.status(403).json({ error: 'Admin access required' });
   const parsed = sourceSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid source' });
   const source = researchSourceRepo.upsert({
@@ -89,6 +122,7 @@ router.post('/research-sources', (req, res) => {
 });
 
 router.patch('/research-sources/:id', (req, res) => {
+  if (!req.user.isAdmin) return res.status(403).json({ error: 'Admin access required' });
   const parsed = sourceSchema.partial().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid source' });
   const source = researchSourceRepo.update(req.user.id, Number(req.params.id), parsed.data);
@@ -99,7 +133,7 @@ router.patch('/research-sources/:id', (req, res) => {
 router.put('/providers/:providerKey', (req, res) => {
   try {
     const fields = req.body?.fields && typeof req.body.fields === 'object' ? req.body.fields : {};
-    res.json(providerConfigService.saveProvider(req.user.id, req.params.providerKey, fields));
+    res.json(providerConfigService.saveProvider(req.user.id, req.params.providerKey, fields, { isAdmin: req.user.isAdmin }));
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -113,8 +147,13 @@ router.patch('/', (req, res) => {
   if (patch.tradingEnabled !== undefined) patch.tradingEnabled = patch.tradingEnabled ? 1 : 0;
   if (patch.sourceLearningEnabled !== undefined) patch.sourceLearningEnabled = patch.sourceLearningEnabled ? 1 : 0;
   if (patch.simulationModeEnabled !== undefined) patch.simulationModeEnabled = patch.simulationModeEnabled ? 1 : 0;
+  if (patch.fractionalTradingEnabled !== undefined) patch.fractionalTradingEnabled = patch.fractionalTradingEnabled ? 1 : 0;
   if (patch.agentPersonalityRefreshEnabled !== undefined) patch.agentPersonalityRefreshEnabled = patch.agentPersonalityRefreshEnabled ? 1 : 0;
   if (patch.agentLocalLearningEnabled !== undefined) patch.agentLocalLearningEnabled = patch.agentLocalLearningEnabled ? 1 : 0;
+  if (patch.excludedSymbols !== undefined) {
+    patch.excludedSymbolsJson = JSON.stringify(patch.excludedSymbols);
+    delete patch.excludedSymbols;
+  }
   if (patch.dashboardLayout !== undefined) {
     patch.dashboardLayoutJson = JSON.stringify(patch.dashboardLayout);
     delete patch.dashboardLayout;
@@ -128,6 +167,20 @@ router.patch('/', (req, res) => {
   }
   scheduler.scheduleUserAutomation(req.user.id, finalSettings);
   res.json(finalSettings);
+});
+
+router.post('/excluded-symbols', (req, res) => {
+  const parsed = excludedSymbolSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid symbol' });
+  res.status(201).json(settingsRepo.addExcludedSymbol(req.user.id, {
+    ...parsed.data,
+    source: parsed.data.source || 'manual-settings',
+    reason: parsed.data.reason || 'Manually excluded in Settings.',
+  }));
+});
+
+router.delete('/excluded-symbols/:symbol', (req, res) => {
+  res.json(settingsRepo.removeExcludedSymbol(req.user.id, req.params.symbol));
 });
 
 router.post('/kill-switch/engage', (req, res) => {

@@ -2,8 +2,9 @@ import { createRouter, createWebHistory } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
 
 const routes = [
+  { path: '/', name: 'home', component: () => import('../views/HomeView.vue'), meta: { public: true } },
   { path: '/login', name: 'login', component: () => import('../views/LoginView.vue'), meta: { public: true } },
-  { path: '/', name: 'dashboard', component: () => import('../views/DashboardView.vue') },
+  { path: '/dashboard', name: 'dashboard', component: () => import('../views/DashboardView.vue') },
   { path: '/research', name: 'research', component: () => import('../views/ResearchView.vue') },
   { path: '/agents', name: 'agents', component: () => import('../views/AgentsView.vue') },
   { path: '/watchers', name: 'watchers', component: () => import('../views/WatcherAgentsView.vue') },
@@ -35,7 +36,7 @@ router.beforeEach(async (to) => {
   if (to.meta.admin && !auth.isAdmin) {
     return { name: 'dashboard' };
   }
-  if (to.name === 'login' && auth.isAuthenticated) {
+  if ((to.name === 'login' || to.name === 'home') && auth.isAuthenticated) {
     return { name: 'dashboard' };
   }
   return true;

@@ -3,6 +3,7 @@ const BrokerClient = require('./BrokerClient');
 const brokerAccountRepo = require('../../db/repositories/brokerAccountRepo');
 const positionRepo = require('../../db/repositories/positionRepo');
 const operationsRepo = require('../../db/repositories/specOperationsRepo');
+const alpacaRules = require('../alpacaRulesService');
 
 class PaperBrokerClient extends BrokerClient {
   /**
@@ -81,10 +82,25 @@ class PaperBrokerClient extends BrokerClient {
     if (!requestedQty || requestedQty <= 0) {
       status = 'rejected';
       reason = 'Quantity must be positive.';
-    } else if (side === 'buy' && notional > accountState.buyingPowerUsd) {
+    } else {
+      const evaluation = alpacaRules.evaluateOrder({
+        userId: this.userId,
+        symbol,
+        side,
+        quantity: requestedQty,
+        price: fillPrice,
+        asset: { fractionable: true, tradable: true },
+      });
+      if (!evaluation.allowed) {
+        status = 'rejected';
+        reason = `Alpaca order rules blocked trade: ${evaluation.failed.join(', ')}`;
+      }
+    }
+
+    if (status === 'filled' && side === 'buy' && notional > accountState.buyingPowerUsd) {
       status = 'rejected';
       reason = 'Insufficient paper buying power.';
-    } else if (this.shouldInjectReject()) {
+    } else if (status === 'filled' && this.shouldInjectReject()) {
       status = 'rejected';
       reason = 'Simulated failure injection: forced reject.';
     }

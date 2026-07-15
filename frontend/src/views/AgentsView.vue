@@ -1,6 +1,6 @@
 <template>
   <div class="page-shell agents-desk">
-    <div class="agents-hero mb-6">
+    <div class="agents-hero ops-command-bar mb-6">
       <div class="min-w-0">
         <p class="page-kicker mb-3">Personality-biased trading agents, BrainMesh debate, and consensus strategy</p>
         <h1 class="page-title">Agent Council</h1>
@@ -30,6 +30,22 @@
             <v-icon size="16" class="mr-1">mdi-forum</v-icon>
             {{ busy === 'council' ? 'Debating...' : 'Run council' }}
           </GlassButton>
+          <button
+            class="hud-window-toggle"
+            :class="{ active: recommendationsWindowOpen }"
+            @click="recommendationsWindowOpen = true"
+          >
+            <v-icon size="15">mdi-chart-timeline-variant</v-icon>
+            picks
+          </button>
+          <button
+            class="hud-window-toggle"
+            :class="{ active: historyWindowOpen }"
+            @click="historyWindowOpen = true"
+          >
+            <v-icon size="15">mdi-history</v-icon>
+            runs
+          </button>
           <GlassButton variant="ghost" :disabled="Boolean(busy)" @click="dialogOpen = true">
             <v-icon size="16" class="mr-1">mdi-account-plus</v-icon>
             Add agent
@@ -140,8 +156,9 @@
           </div>
           <div class="mt-5">
             <div class="text-xs uppercase text-white/36 mb-3">attached sources</div>
-            <div class="source-list">
-              <a v-for="url in selectedAgent.sourceUrls" :key="url" :href="url" target="_blank" rel="noreferrer" class="source-row mini-glass">
+            <div v-if="!agentSourcePager.total" class="text-white/42 text-sm">No attached sources for this agent yet.</div>
+            <div v-else class="source-list">
+              <a v-for="url in paginatedAgentSources" :key="url" :href="url" target="_blank" rel="noreferrer" class="source-row mini-glass">
                 <span class="source-dot"></span>
                 <span class="min-w-0">
                   <strong>{{ host(url) }}</strong>
@@ -149,13 +166,53 @@
                 </span>
               </a>
             </div>
+            <div v-if="agentSourcePager.total" class="agent-source-pagination mt-3">
+              <div class="agent-source-summary">
+                <span>{{ agentSourcePager.total }} sources</span>
+                <span>{{ agentSourcePager.start }}-{{ agentSourcePager.end }} visible</span>
+                <span>page {{ agentSourcePager.current }} / {{ agentSourcePager.totalPages }}</span>
+              </div>
+              <div class="agent-source-controls">
+                <v-select
+                  v-model="agentSourcePageSize"
+                  :items="[5, 10, 25]"
+                  label="Rows"
+                  variant="outlined"
+                  density="compact"
+                  hide-details
+                  class="agent-source-page-size"
+                />
+                <button class="hud-window-toggle" :disabled="agentSourcePage <= 1" @click="agentSourcePage -= 1">
+                  <v-icon size="15">mdi-chevron-left</v-icon>
+                  prev
+                </button>
+                <button
+                  class="hud-window-toggle"
+                  :disabled="agentSourcePage >= agentSourcePager.totalPages"
+                  @click="agentSourcePage += 1"
+                >
+                  next
+                  <v-icon size="15">mdi-chevron-right</v-icon>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </GlassCard>
     </div>
 
-    <div class="bento-grid stagger mt-6">
-      <GlassCard title="Consensus recommendations" class="bento-span-7">
+    <aside
+      v-if="recommendationsWindowOpen"
+      class="floating-glass-window floating-agent-window floating-agent-recommendations"
+    >
+      <div class="floating-window-head">
+        <span>
+          Consensus recommendations
+          <small>{{ latestRun ? `run #${latestRun.id}` : 'standby' }}</small>
+        </span>
+        <button @click="recommendationsWindowOpen = false"><v-icon size="16">mdi-close</v-icon></button>
+      </div>
+      <div class="floating-window-body">
         <div v-if="!latestRun" class="text-white/42 text-sm">Run the council to produce recommendations.</div>
         <div v-else class="consensus-list">
           <div v-for="rec in latestRun.summary.finalRecommendations" :key="rec.symbol" class="consensus-row mini-glass">
@@ -169,12 +226,30 @@
             </div>
           </div>
         </div>
-      </GlassCard>
+      </div>
+    </aside>
 
-      <GlassCard title="Council run history" class="bento-span-5">
+    <aside
+      v-if="historyWindowOpen"
+      class="floating-glass-window floating-agent-window floating-agent-history"
+    >
+      <div class="floating-window-head">
+        <span>
+          Council run history
+          <small>{{ runs.length }} records</small>
+        </span>
+        <button @click="historyWindowOpen = false"><v-icon size="16">mdi-close</v-icon></button>
+      </div>
+      <div class="floating-window-body">
         <div v-if="!runs.length" class="text-white/42 text-sm">No council runs yet.</div>
         <div v-else class="flex flex-col gap-3">
-          <button v-for="run in runs" :key="run.id" class="run-row mini-glass" @click="selectedRunId = run.id">
+          <button
+            v-for="run in runs"
+            :key="run.id"
+            class="run-row mini-glass"
+            :class="{ active: selectedRunId === run.id }"
+            @click="openRunResult(run)"
+          >
             <span>
               <strong>#{{ run.id }} · {{ run.status }}</strong>
               <small>{{ run.created_at }} · {{ run.conversation_id }}</small>
@@ -182,8 +257,72 @@
             <span>{{ run.summary?.finalRecommendations?.length || 0 }}</span>
           </button>
         </div>
-      </GlassCard>
-    </div>
+      </div>
+    </aside>
+
+    <aside
+      v-if="runResultWindowOpen && selectedRunResult"
+      class="floating-glass-window floating-agent-window floating-agent-run-results"
+      :style="{ transform: `translate(${runResultWindowPosition.x}px, ${runResultWindowPosition.y}px)` }"
+    >
+      <div class="floating-window-head movable-head" @pointerdown="startRunResultDrag">
+        <span>
+          council run results
+          <small>#{{ selectedRunResult.id }} · {{ selectedRunResult.status }}</small>
+        </span>
+        <button @click.stop="runResultWindowOpen = false"><v-icon size="16">mdi-close</v-icon></button>
+      </div>
+      <div class="floating-window-body">
+        <div class="hud-stat-grid mb-4">
+          <div class="hud-stat">
+            <strong>{{ selectedRunResult.summary?.agentCount || agents.length }}</strong>
+            <span>agents</span>
+          </div>
+          <div class="hud-stat">
+            <strong>{{ selectedRunResult.summary?.recommendationCount || selectedRunResult.recommendations?.length || 0 }}</strong>
+            <span>votes</span>
+          </div>
+          <div class="hud-stat">
+            <strong>{{ selectedRunResult.summary?.finalRecommendations?.length || 0 }}</strong>
+            <span>consensus</span>
+          </div>
+        </div>
+
+        <div class="run-result-section">
+          <div class="text-xs uppercase text-white/36 mb-3">consensus recommendations</div>
+          <div v-if="!selectedRunResult.summary?.finalRecommendations?.length" class="text-white/42 text-sm">No consensus recommendations were stored for this run.</div>
+          <div v-else class="consensus-list">
+            <div v-for="rec in selectedRunResult.summary.finalRecommendations" :key="`${selectedRunResult.id}-${rec.symbol}`" class="consensus-row mini-glass">
+              <div>
+                <strong class="font-headline text-lg">{{ rec.symbol }}</strong>
+                <small>{{ rec.supportingAgents?.join(', ') || 'no supporting agents' }}</small>
+              </div>
+              <span class="hud-chip" :class="rec.action === 'buy' ? 'text-accent' : rec.action === 'sell' ? 'text-danger' : ''">{{ rec.action }}</span>
+              <div class="score-ring" :style="{ '--score': `${Math.max(0, Math.min(100, rec.avgConviction || rec.consensusScore || 0))}%` }">
+                <span>{{ rec.avgConviction || rec.consensusScore || 0 }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="run-result-section mt-4">
+          <div class="text-xs uppercase text-white/36 mb-3">agent votes</div>
+          <div v-if="!selectedRunResult.recommendations?.length" class="text-white/42 text-sm">No individual agent votes were stored for this run.</div>
+          <div v-else class="run-vote-list">
+            <div v-for="vote in selectedRunResult.recommendations" :key="`${selectedRunResult.id}-${vote.agent_id}-${vote.symbol}`" class="run-vote-row mini-glass">
+              <strong>{{ agentNameFor(vote.agent_id) }}</strong>
+              <span :class="vote.action === 'buy' ? 'text-accent' : vote.action === 'sell' ? 'text-danger' : 'text-white/58'">{{ vote.action }} {{ vote.symbol }}</span>
+              <small>{{ vote.conviction }} · {{ vote.rationale || vote.evidence?.reason || 'no rationale captured' }}</small>
+            </div>
+          </div>
+        </div>
+
+        <details class="run-result-raw mt-4">
+          <summary>summary payload</summary>
+          <code>{{ compact(selectedRunResult.summary) }}</code>
+        </details>
+      </div>
+    </aside>
 
     <v-dialog v-model="dialogOpen" max-width="520">
       <div class="glass-panel p-5">
@@ -258,7 +397,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import api from '../api/client';
 import GlassCard from '../components/GlassCard.vue';
 import GlassButton from '../components/GlassButton.vue';
@@ -270,12 +409,20 @@ const selectedRunId = ref(null);
 const dialogOpen = ref(false);
 const editDialogOpen = ref(false);
 const importDialogOpen = ref(false);
+const recommendationsWindowOpen = ref(false);
+const historyWindowOpen = ref(false);
+const runResultWindowOpen = ref(false);
+const selectedRunResult = ref(null);
+const runResultWindowPosition = ref({ x: 0, y: 0 });
+const agentSourcePage = ref(1);
+const agentSourcePageSize = ref(5);
 const agentName = ref('');
 const importPayload = ref('');
 const activeAgentRun = ref(null);
 const agentTerminalOpen = ref(false);
 const agentTerminalPosition = ref({ x: 0, y: 0 });
 const terminalDrag = ref(null);
+const runResultDrag = ref(null);
 const editForm = ref({
   id: null,
   name: '',
@@ -290,6 +437,21 @@ let agentPollTimer = null;
 
 const latestRun = computed(() => runs.value.find((run) => run.id === selectedRunId.value) || runs.value[0] || null);
 const meshTrace = computed(() => latestRun.value?.conversation_id ? 'online' : 'ready');
+const selectedAgentSources = computed(() => selectedAgent.value?.sourceUrls || []);
+const agentSourcePager = computed(() => {
+  const total = selectedAgentSources.value.length;
+  const size = Number(agentSourcePageSize.value) || 5;
+  const totalPages = Math.max(1, Math.ceil(total / size));
+  const current = Math.min(agentSourcePage.value, totalPages);
+  const start = total ? (current - 1) * size + 1 : 0;
+  const end = Math.min(total, current * size);
+  return { total, size, totalPages, current, start, end };
+});
+const paginatedAgentSources = computed(() => {
+  const pager = agentSourcePager.value;
+  const start = (pager.current - 1) * pager.size;
+  return selectedAgentSources.value.slice(start, start + pager.size);
+});
 
 async function load() {
   const [agentRes, runRes] = await Promise.all([
@@ -408,6 +570,37 @@ function stopTerminalDrag() {
   window.removeEventListener('pointermove', moveTerminal);
 }
 
+function openRunResult(run) {
+  selectedRunId.value = run.id;
+  selectedRunResult.value = run;
+  runResultWindowOpen.value = true;
+}
+
+function startRunResultDrag(event) {
+  if (event.target?.closest?.('button')) return;
+  runResultDrag.value = {
+    startX: event.clientX,
+    startY: event.clientY,
+    originX: runResultWindowPosition.value.x,
+    originY: runResultWindowPosition.value.y,
+  };
+  window.addEventListener('pointermove', moveRunResult);
+  window.addEventListener('pointerup', stopRunResultDrag, { once: true });
+}
+
+function moveRunResult(event) {
+  if (!runResultDrag.value) return;
+  runResultWindowPosition.value = {
+    x: runResultDrag.value.originX + event.clientX - runResultDrag.value.startX,
+    y: runResultDrag.value.originY + event.clientY - runResultDrag.value.startY,
+  };
+}
+
+function stopRunResultDrag() {
+  runResultDrag.value = null;
+  window.removeEventListener('pointermove', moveRunResult);
+}
+
 function timeOnly(value) {
   return value ? new Date(value).toLocaleTimeString() : '';
 }
@@ -420,6 +613,7 @@ function compact(value) {
 onUnmounted(() => {
   clearAgentPolling();
   window.removeEventListener('pointermove', moveTerminal);
+  window.removeEventListener('pointermove', moveRunResult);
 });
 
 function openEdit(agent) {
@@ -515,6 +709,7 @@ async function runCouncil() {
     const { data } = await api.post('/agents/council/run', {});
     await load();
     selectedRunId.value = data.id;
+    recommendationsWindowOpen.value = true;
   } catch (err) {
     error.value = err.response?.data?.error || 'Council run failed';
   } finally {
@@ -526,10 +721,25 @@ function entries(value) {
   return Object.entries(value || {}).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
 }
 
+function agentNameFor(agentId) {
+  return agents.value.find((agent) => agent.id === agentId || agent.id === Number(agentId))?.name || `agent ${agentId}`;
+}
+
 function signed(value) {
   const number = Number(value || 0);
   return `${number >= 0 ? '+' : ''}${number.toFixed(2)}`;
 }
+
+watch(
+  () => [selectedAgent.value?.id, agentSourcePageSize.value],
+  () => {
+    agentSourcePage.value = 1;
+  }
+);
+
+watch(agentSourcePager, (pager) => {
+  if (agentSourcePage.value > pager.totalPages) agentSourcePage.value = pager.totalPages;
+});
 
 function host(url) {
   try {

@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const providerCredentialRepo = require('../db/repositories/providerCredentialRepo');
 const researchSourceRepo = require('../db/repositories/researchSourceRepo');
 const finnhub = require('./marketData/finnhubClient');
+const alpacaAssetClient = require('./marketData/alpacaAssetClient');
 const crawler = require('./crawleeResearchCrawlerService');
 const companyDiscovery = require('./companyDiscoveryService');
 const brainMesh = require('./brainMeshService');
@@ -95,7 +96,9 @@ async function executeRun(runId, createAgent) {
       companies: discovered,
       onEvent,
     });
-    const profile = buildProfileFromResearch({ name: run.name, pages: crawl.pages, sourceUrls, discovered, finnhubResearch });
+    const enrichedSymbols = new Set(finnhubResearch.map((item) => item.symbol));
+    const eligibleDiscovered = discovered.filter((item) => enrichedSymbols.has(item.symbol));
+    const profile = buildProfileFromResearch({ name: run.name, pages: crawl.pages, sourceUrls, discovered: eligibleDiscovered, finnhubResearch });
 
     setRun(run, { phase: 'agent-profile-save', progress: 88 });
     append(run, {
@@ -105,7 +108,7 @@ async function executeRun(runId, createAgent) {
       message: 'Saving researched agent profile, metadata, sources, and company opportunity map.',
       data: {
         sourceUrls: sourceUrls.length,
-        companies: discovered.map((item) => item.symbol).slice(0, 12),
+        companies: eligibleDiscovered.map((item) => item.symbol).slice(0, 12),
         finnhubCompanies: finnhubResearch.filter((item) => item.available).length,
       },
     });
@@ -141,6 +144,13 @@ async function executeRun(runId, createAgent) {
       level: 'info',
       message: `Agent ${agent.name} is ready with ${agent.sourceUrls.length} source URLs and ${(agent.bias?.watchSymbols || []).length} watch symbols.`,
       data: { agentId: agent.id, workspace: agent.workspace },
+    });
+    brainMesh.completeConversation(conversation.id, run.userId, {
+      completedBy: agent.brain_id,
+      completedOp: 'agent.profile.ready',
+      completedAt: new Date().toISOString(),
+      agentId: agent.id,
+      agentResearchRunId: run.id,
     });
   } catch (err) {
     setRun(run, { status: 'failed', phase: 'failed', error: err.message, progress: 100 });
@@ -268,17 +278,30 @@ function extractLooseTickers(pages) {
 }
 
 async function enrichCompaniesWithFinnhub({ userId, name, companies, onEvent }) {
+  const { kept, excluded } = await alpacaAssetClient.filterCandidates(companies, {
+    userId,
+    source: `agent-profile-research:${slugify(name)}`,
+  });
+  if (excluded.length) {
+    appendEvent(onEvent, 'alpaca-agent-eligibility', 68, 'warn', 'Excluded agent-discovered symbols that Alpaca does not report as tradable.', {
+      excluded: excluded.slice(0, 10).map((item) => ({
+        symbol: item.symbol,
+        companyName: item.companyName,
+        reason: item.alpacaEligibility?.reason,
+      })),
+    });
+  }
   const credentials = userId ? providerCredentialRepo.getSecret(userId, 'finnhub') : null;
   const apiKey = credentials?.apiKey || config.finnhubApiKey;
   if (!apiKey) {
     appendEvent(onEvent, 'finnhub-agent-research', 70, 'warn', 'Finnhub credentials unavailable; agent company expansion will rely on crawled evidence only.', {
-      companies: companies.map((item) => item.symbol).slice(0, 10),
+      companies: kept.map((item) => item.symbol).slice(0, 10),
     });
-    return companies.slice(0, 10).map((item) => ({ symbol: item.symbol, available: false }));
+    return kept.slice(0, 10).map((item) => ({ symbol: item.symbol, available: false }));
   }
 
   const researched = [];
-  for (const company of companies.slice(0, 10)) {
+  for (const company of kept.slice(0, 10)) {
     appendEvent(onEvent, 'finnhub-agent-research', 70, 'debug', `Researching ${company.symbol} through Finnhub for ${name}.`, {
       symbol: company.symbol,
       companyName: company.companyName,

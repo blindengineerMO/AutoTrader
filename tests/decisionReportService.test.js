@@ -37,6 +37,7 @@ describe('decisionReportService.buildDecisionReport', () => {
       actions: [
         { symbol: 'AAPL', action: 'buy', quantity: 1, status: 'proposed', rationale: 'Undervalued' },
         { symbol: 'MSFT', action: 'hold', quantity: 0, status: 'proposed', rationale: 'No signal' },
+        { symbol: 'F', action: 'sell', quantity: 2, status: 'proposed', rationale: 'Current owned position review recommends sell after weak score.' },
       ],
     };
     const researchSnapshot = {
@@ -45,6 +46,7 @@ describe('decisionReportService.buildDecisionReport', () => {
       summary: { sourceStack: ['sec-filings'], reportNarrative: 'Markets calm.', prePlan: null },
       signals: [
         { symbol: 'AAPL', price: 190, changePct: 1.2, volatilityPct: 0.5, momentum: 'up', actionBias: 'buy', localAiScore: 0.8, theme: 'value', newsSentiment: 0.4, macroRisk: 'low', consumerBias: 'neutral', brokerFactorScore: 0.6, investorPlaybookScore: 0.7, jsonDatasetScore: 0.5, brainModelKey: 'aapl-v1', evidence: { discovery: 'sec-10k', historicalWatchFactors: ['margin-expansion'], explanation: ['strong margins'], quote: 'Revenue up 12%.' } },
+        { symbol: 'F', price: 13, changePct: -1.1, volatilityPct: 1.8, momentum: 'down', actionBias: 'sell-or-avoid', localAiScore: 32, theme: 'auto', evidence: { explanation: ['auto demand weakening'] } },
       ],
     };
 
@@ -57,9 +59,13 @@ describe('decisionReportService.buildDecisionReport', () => {
       modeReason: 'Model not yet promoted to champion',
       accountState: { cashUsd: 1000 },
       brokerAccount: { status: 'connected' },
+      positions: [
+        { id: 7, symbol: 'F', quantity: 2, avg_cost_usd: 14, updated_at: '2026-07-14 10:00:00' },
+        { id: 8, symbol: 'TSLA', quantity: 1, avg_cost_usd: 220, updated_at: '2026-07-14 10:00:00' },
+      ],
     });
 
-    expect(report.summary.actions).toHaveLength(2);
+    expect(report.summary.actions).toHaveLength(3);
     const aaplAction = report.summary.actions.find((a) => a.symbol === 'AAPL');
     expect(aaplAction.evidence.price).toBe(190);
     expect(aaplAction.evidence.discovery).toBe('sec-10k');
@@ -67,6 +73,23 @@ describe('decisionReportService.buildDecisionReport', () => {
 
     const msftAction = report.summary.actions.find((a) => a.symbol === 'MSFT');
     expect(msftAction.evidence).toBeNull();
+    const fordAction = report.summary.actions.find((a) => a.symbol === 'F');
+    expect(fordAction.ownedPosition).toMatchObject({ quantity: 2, avgCostUsd: 14, currentResearchPriceUsd: 13 });
+    expect(fordAction.positionReviewAction).toBe('sell');
+    expect(report.summary.ownedPositionReviews).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        symbol: 'F',
+        action: 'sell',
+        executableAction: 'sell',
+        position: expect.objectContaining({ unrealizedPnlUsd: -2 }),
+      }),
+      expect.objectContaining({
+        symbol: 'TSLA',
+        action: 'hold',
+        executableAction: 'hold',
+        rationale: expect.stringMatching(/no explicit plan action/i),
+      }),
+    ]));
 
     expect(report.summary.mode).toBe('simulation');
     expect(report.summary.liveReady).toBe(false);

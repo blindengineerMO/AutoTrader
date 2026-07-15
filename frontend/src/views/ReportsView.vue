@@ -1,8 +1,17 @@
 <template>
   <div class="page-shell">
-    <div class="mb-10">
-      <p class="page-kicker mb-3">Decision reports, daily self-evaluations, and source-learning adjustments</p>
-      <h1 class="page-title">Reports</h1>
+    <div class="ops-command-bar reports-command-bar mb-6">
+      <div class="min-w-0">
+        <p class="page-kicker mb-3">Decision reports, daily self-evaluations, and source-learning adjustments</p>
+        <h1 class="page-title">Reports</h1>
+      </div>
+      <div class="reports-command-actions mini-glass">
+        <div class="text-xs uppercase text-white/40">report windows</div>
+        <button class="hud-window-toggle" :class="{ active: decisionReportsOpen }" @click="decisionReportsOpen = !decisionReportsOpen">
+          <v-icon size="15">mdi-file-chart-outline</v-icon>
+          decision reports
+        </button>
+      </div>
     </div>
 
     <div v-if="error" class="glass-panel p-4 text-danger text-sm mb-5">{{ error }}</div>
@@ -80,6 +89,92 @@
       </GlassCard>
     </div>
 
+    <div class="bento-grid stagger mb-5">
+      <GlassCard title="Alpaca invoices/statements" class="bento-span-12">
+        <div class="alpaca-doc-controls mini-glass mb-4">
+          <v-text-field
+            v-model="alpacaDocumentQuery.search"
+            label="Search documents"
+            prepend-inner-icon="mdi-magnify"
+            variant="outlined"
+            density="compact"
+            hide-details
+            @keyup.enter="applyAlpacaDocumentQuery"
+          />
+          <v-select
+            v-model="alpacaDocumentQuery.documentType"
+            :items="alpacaDocumentTypes"
+            label="Type"
+            variant="outlined"
+            density="compact"
+            hide-details
+            @update:model-value="applyAlpacaDocumentQuery"
+          />
+          <v-select
+            v-model="alpacaDocumentQuery.sortBy"
+            :items="alpacaDocumentSortItems"
+            label="Sort"
+            variant="outlined"
+            density="compact"
+            hide-details
+            @update:model-value="loadAlpacaDocuments"
+          />
+          <button class="hud-chip hud-chip-button" @click="toggleAlpacaDocumentSort">
+            <v-icon size="15">{{ alpacaDocumentQuery.sortDir === 'asc' ? 'mdi-sort-ascending' : 'mdi-sort-descending' }}</v-icon>
+            {{ alpacaDocumentQuery.sortDir }}
+          </button>
+          <GlassButton :disabled="syncingAlpacaDocuments" @click="syncAlpacaDocuments">
+            {{ syncingAlpacaDocuments ? 'Syncing...' : 'Sync now' }}
+          </GlassButton>
+        </div>
+        <div v-if="alpacaDocumentError" class="text-danger text-sm mb-3">{{ alpacaDocumentError }}</div>
+        <div class="source-memory-summary mb-3">
+          <span>{{ alpacaDocumentPager.total }} documents</span>
+          <span>page {{ alpacaDocumentPager.page }} / {{ alpacaDocumentPager.totalPages }}</span>
+        </div>
+        <div v-if="!alpacaDocuments.length" class="mini-glass p-4 text-white/42 text-sm">
+          No Alpaca account documents synced yet. Configure Alpaca Broker API details in Settings, then sync.
+        </div>
+        <div v-else class="alpaca-doc-list">
+          <div v-for="document in alpacaDocuments" :key="document.id" class="alpaca-doc-row mini-glass">
+            <div class="min-w-0">
+              <div class="font-headline text-white/85 truncate">{{ document.name || document.document_id }}</div>
+              <div class="hud-card-meta">
+                <span class="hud-chip">{{ document.document_type }}</span>
+                <span class="hud-chip">{{ document.document_date || 'undated' }}</span>
+                <span class="hud-chip">{{ document.status }}</span>
+                <span class="hud-chip">downloaded {{ formatDate(document.downloaded_at) }}</span>
+              </div>
+            </div>
+            <button class="hud-window-toggle" title="Download Alpaca document" @click="downloadAlpacaDocument(document)">
+              <v-icon size="15">mdi-download</v-icon>
+              download
+            </button>
+          </div>
+        </div>
+        <div class="source-pagination mt-4">
+          <v-select
+            v-model="alpacaDocumentQuery.pageSize"
+            :items="[5, 10, 25, 50]"
+            label="Rows"
+            variant="outlined"
+            density="compact"
+            hide-details
+            class="source-page-size"
+            @update:model-value="applyAlpacaDocumentQuery"
+          />
+          <button class="hud-chip hud-chip-button" :disabled="alpacaDocumentPager.page <= 1" @click="changeAlpacaDocumentPage(-1)">
+            <v-icon size="15">mdi-chevron-left</v-icon>
+            previous
+          </button>
+          <button class="hud-chip hud-chip-button" :disabled="alpacaDocumentPager.page >= alpacaDocumentPager.totalPages" @click="changeAlpacaDocumentPage(1)">
+            next
+            <v-icon size="15">mdi-chevron-right</v-icon>
+          </button>
+        </div>
+      </GlassCard>
+    </div>
+
     <div class="bento-grid stagger">
       <GlassCard title="Evaluation reports" class="bento-span-5">
         <div class="flex items-center gap-3 mb-4">
@@ -151,7 +246,21 @@
         </div>
       </GlassCard>
 
-      <GlassCard title="Decision reports" class="bento-span-12">
+    </div>
+
+    <aside
+      v-if="decisionReportsOpen"
+      class="floating-glass-window floating-reports-window floating-decision-reports-window"
+      :style="{ transform: `translate(${decisionReportsWindowPosition.x}px, ${decisionReportsWindowPosition.y}px)` }"
+    >
+      <div class="floating-window-head movable-head" @pointerdown="startDecisionReportsDrag">
+        <span>
+          decision reports
+          <small>{{ decisionReports.length }} records</small>
+        </span>
+        <button @click.stop="decisionReportsOpen = false"><v-icon size="16">mdi-close</v-icon></button>
+      </div>
+      <div class="floating-window-body">
         <div v-if="!decisionReports.length" class="text-white/42 text-sm">No decision reports yet.</div>
         <div v-else class="decision-report-grid">
           <div v-for="report in decisionReports" :key="report.id" class="mini-glass p-4">
@@ -174,13 +283,13 @@
             </div>
           </div>
         </div>
-      </GlassCard>
-    </div>
+      </div>
+    </aside>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import api from '../api/client';
 import GlassCard from '../components/GlassCard.vue';
 import GlassButton from '../components/GlassButton.vue';
@@ -198,6 +307,37 @@ const forecastSymbol = ref('');
 const forecast = ref(null);
 const forecastError = ref('');
 const loadingForecast = ref(false);
+const decisionReportsOpen = ref(false);
+const decisionReportsWindowPosition = ref({ x: 0, y: 0 });
+const decisionReportsDrag = ref(null);
+const alpacaDocuments = ref([]);
+const alpacaDocumentPager = ref({ total: 0, page: 1, pageSize: 5, totalPages: 1 });
+const alpacaDocumentQuery = ref({
+  page: 1,
+  pageSize: 5,
+  search: '',
+  documentType: '',
+  sortBy: 'document_date',
+  sortDir: 'desc',
+});
+const alpacaDocumentError = ref('');
+const syncingAlpacaDocuments = ref(false);
+const alpacaDocumentTypes = [
+  { title: 'All documents', value: '' },
+  { title: 'Account statements', value: 'account_statement' },
+  { title: 'Crypto statements', value: 'crypto_account_statement' },
+  { title: 'Tax statements', value: 'tax_statement' },
+  { title: 'Trade confirmations', value: 'trade_confirmation' },
+  { title: 'Trade confirmations JSON', value: 'trade_confirmation_json' },
+];
+const alpacaDocumentSortItems = [
+  { title: 'Document date', value: 'document_date' },
+  { title: 'Type', value: 'document_type' },
+  { title: 'Name', value: 'name' },
+  { title: 'Status', value: 'status' },
+  { title: 'Downloaded', value: 'downloaded_at' },
+  { title: 'Last updated', value: 'updated_at' },
+];
 
 const forecastLabels = computed(() => (forecast.value?.days || []).map((d) => `D${d.day}`));
 
@@ -228,9 +368,77 @@ async function load() {
   const [decisionRes, evaluationRes] = await Promise.all([
     api.get('/research/reports?limit=50'),
     api.get('/research/evaluations?limit=50'),
+    loadAlpacaDocuments(),
   ]);
   decisionReports.value = decisionRes.data;
   evaluations.value = evaluationRes.data;
+}
+
+async function loadAlpacaDocuments() {
+  alpacaDocumentError.value = '';
+  try {
+    const { data } = await api.get('/research/alpaca-documents', {
+      params: {
+        ...alpacaDocumentQuery.value,
+        search: alpacaDocumentQuery.value.search || undefined,
+        documentType: alpacaDocumentQuery.value.documentType || undefined,
+      },
+    });
+    alpacaDocuments.value = data.items || [];
+    alpacaDocumentPager.value = {
+      total: data.total || 0,
+      page: data.page || 1,
+      pageSize: data.pageSize || alpacaDocumentQuery.value.pageSize,
+      totalPages: data.totalPages || 1,
+    };
+    alpacaDocumentQuery.value.page = alpacaDocumentPager.value.page;
+    alpacaDocumentQuery.value.pageSize = alpacaDocumentPager.value.pageSize;
+  } catch (err) {
+    alpacaDocumentError.value = err.response?.data?.error || 'Alpaca document load failed';
+  }
+}
+
+function applyAlpacaDocumentQuery() {
+  alpacaDocumentQuery.value.page = 1;
+  loadAlpacaDocuments();
+}
+
+function toggleAlpacaDocumentSort() {
+  alpacaDocumentQuery.value.sortDir = alpacaDocumentQuery.value.sortDir === 'asc' ? 'desc' : 'asc';
+  loadAlpacaDocuments();
+}
+
+function changeAlpacaDocumentPage(delta) {
+  const next = Math.min(alpacaDocumentPager.value.totalPages, Math.max(1, alpacaDocumentQuery.value.page + delta));
+  if (next === alpacaDocumentQuery.value.page) return;
+  alpacaDocumentQuery.value.page = next;
+  loadAlpacaDocuments();
+}
+
+async function syncAlpacaDocuments() {
+  alpacaDocumentError.value = '';
+  syncingAlpacaDocuments.value = true;
+  try {
+    const { data } = await api.post('/research/alpaca-documents/sync');
+    if (data.skipped) alpacaDocumentError.value = data.reason;
+    await loadAlpacaDocuments();
+  } catch (err) {
+    alpacaDocumentError.value = err.response?.data?.error || 'Alpaca document sync failed';
+  } finally {
+    syncingAlpacaDocuments.value = false;
+  }
+}
+
+async function downloadAlpacaDocument(document) {
+  alpacaDocumentError.value = '';
+  try {
+    const { data } = await api.get(`/research/alpaca-documents/${document.id}/download`);
+    if (!data.url) throw new Error('No download URL returned.');
+    window.open(data.url, '_blank', 'noopener,noreferrer');
+    await loadAlpacaDocuments();
+  } catch (err) {
+    alpacaDocumentError.value = err.response?.data?.error || err.message || 'Alpaca document download failed';
+  }
 }
 
 async function runEvaluation() {
@@ -245,6 +453,36 @@ async function runEvaluation() {
   } finally {
     runningEvaluation.value = false;
   }
+}
+
+function startDecisionReportsDrag(event) {
+  if (event.target?.closest?.('button')) return;
+  decisionReportsDrag.value = {
+    startX: event.clientX,
+    startY: event.clientY,
+    originX: decisionReportsWindowPosition.value.x,
+    originY: decisionReportsWindowPosition.value.y,
+  };
+  window.addEventListener('pointermove', moveDecisionReports);
+  window.addEventListener('pointerup', stopDecisionReportsDrag, { once: true });
+}
+
+function moveDecisionReports(event) {
+  if (!decisionReportsDrag.value) return;
+  decisionReportsWindowPosition.value = {
+    x: decisionReportsDrag.value.originX + event.clientX - decisionReportsDrag.value.startX,
+    y: decisionReportsDrag.value.originY + event.clientY - decisionReportsDrag.value.startY,
+  };
+}
+
+function stopDecisionReportsDrag() {
+  decisionReportsDrag.value = null;
+  window.removeEventListener('pointermove', moveDecisionReports);
+}
+
+function formatDate(value) {
+  if (!value) return 'never';
+  return new Date(value).toLocaleDateString();
 }
 
 const accuracyTrend = computed(() => {
@@ -294,4 +532,7 @@ const actionDistribution = computed(() => {
 });
 
 onMounted(load);
+onUnmounted(() => {
+  window.removeEventListener('pointermove', moveDecisionReports);
+});
 </script>

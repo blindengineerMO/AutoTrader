@@ -1,6 +1,6 @@
 <template>
   <div class="page-shell research-desk">
-    <div class="research-hero mb-7">
+    <div class="research-hero ops-command-bar mb-6">
       <div class="min-w-0">
         <p class="page-kicker mb-3">Autonomous source collection, financial evaluation, and traceable decision reports</p>
         <h1 class="page-title">Research Desk</h1>
@@ -38,6 +38,14 @@
           <button class="hud-window-toggle" :class="{ active: decisionOpen }" @click="decisionOpen = !decisionOpen">
             <v-icon size="16">mdi-file-chart-outline</v-icon>
             decision report
+          </button>
+          <button class="hud-window-toggle" :class="{ active: researchRunsOpen }" @click="researchRunsOpen = !researchRunsOpen">
+            <v-icon size="16">mdi-history</v-icon>
+            runs
+          </button>
+          <button class="hud-window-toggle" :class="{ active: planHistoryOpen }" @click="planHistoryOpen = !planHistoryOpen">
+            <v-icon size="16">mdi-clipboard-text-clock-outline</v-icon>
+            plans
           </button>
         </div>
       </div>
@@ -187,41 +195,6 @@
     </div>
 
     <div class="bento-grid stagger">
-      <GlassCard title="Research runs" class="bento-span-5">
-        <div v-if="!runs.length" class="text-white/42 text-sm">No research operations yet.</div>
-        <div v-else class="flex flex-col gap-3">
-          <button v-for="run in runs" :key="run.id" class="run-row mini-glass" @click="selectRun(run)">
-            <span>
-              <strong>#{{ run.id }} · {{ run.status }}</strong>
-              <small>{{ run.started_at }} · {{ run.phase }}</small>
-            </span>
-            <span>{{ run.progress }}%</span>
-          </button>
-        </div>
-      </GlassCard>
-
-      <GlassCard title="Plan history" class="bento-span-7">
-        <div v-if="!plans.length" class="text-white/42 text-sm">No trading plans yet.</div>
-        <div v-else class="flex flex-col gap-3">
-          <div v-for="plan in plans.slice(0, 6)" :key="plan.id" class="mini-glass p-4">
-            <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
-              <div class="text-xs text-white/40">{{ plan.created_at }} · {{ plan.model_used }}</div>
-              <div class="flex gap-2">
-                <span class="hud-chip">{{ plan.execution_mode }}</span>
-                <span class="hud-chip">{{ plan.status }}</span>
-              </div>
-            </div>
-            <div class="plan-action-grid">
-              <div v-for="a in plan.actions" :key="a.id" class="text-xs">
-                <strong :class="a.action === 'buy' ? 'text-accent' : a.action === 'sell' ? 'text-danger' : 'text-white/55'">{{ a.action }}</strong>
-                <span>{{ a.symbol }}</span>
-                <small>{{ a.status }}</small>
-              </div>
-            </div>
-          </div>
-        </div>
-      </GlassCard>
-
       <GlassCard title="SPEC backtests & monitoring" class="bento-span-12">
         <div class="candidate-split-grid">
           <section class="candidate-panel mini-glass">
@@ -353,6 +326,67 @@
       </div>
     </aside>
 
+    <aside
+      v-if="researchRunsOpen"
+      class="floating-glass-window floating-research-desk-window floating-research-runs-window"
+      :style="{ transform: `translate(${researchWindowPositions.runs.x}px, ${researchWindowPositions.runs.y}px)` }"
+    >
+      <div class="floating-window-head movable-head" @pointerdown="startResearchWindowDrag($event, 'runs')">
+        <span>
+          research runs
+          <small>{{ runs.length }} records</small>
+        </span>
+        <button @click.stop="researchRunsOpen = false"><v-icon size="16">mdi-close</v-icon></button>
+      </div>
+      <div class="floating-window-body">
+        <div v-if="!runs.length" class="text-white/42 text-sm">No research operations yet.</div>
+        <div v-else class="flex flex-col gap-3">
+          <button v-for="run in runs" :key="run.id" class="run-row mini-glass" @click="selectRun(run)">
+            <span>
+              <strong>#{{ run.id }} · {{ run.status }}</strong>
+              <small>{{ run.started_at }} · {{ run.phase }}</small>
+            </span>
+            <span>{{ run.progress }}%</span>
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <aside
+      v-if="planHistoryOpen"
+      class="floating-glass-window floating-research-desk-window floating-plan-history-window"
+      :style="{ transform: `translate(${researchWindowPositions.plans.x}px, ${researchWindowPositions.plans.y}px)` }"
+    >
+      <div class="floating-window-head movable-head" @pointerdown="startResearchWindowDrag($event, 'plans')">
+        <span>
+          plan history
+          <small>{{ plans.length }} records</small>
+        </span>
+        <button @click.stop="planHistoryOpen = false"><v-icon size="16">mdi-close</v-icon></button>
+      </div>
+      <div class="floating-window-body">
+        <div v-if="!plans.length" class="text-white/42 text-sm">No trading plans yet.</div>
+        <div v-else class="flex flex-col gap-3">
+          <div v-for="plan in plans" :key="plan.id" class="mini-glass p-4">
+            <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
+              <div class="text-xs text-white/40">{{ plan.created_at }} · {{ plan.model_used }}</div>
+              <div class="flex gap-2">
+                <span class="hud-chip">{{ plan.execution_mode }}</span>
+                <span class="hud-chip">{{ plan.status }}</span>
+              </div>
+            </div>
+            <div class="plan-action-grid">
+              <div v-for="a in plan.actions" :key="a.id" class="text-xs">
+                <strong :class="a.action === 'buy' ? 'text-accent' : a.action === 'sell' ? 'text-danger' : 'text-white/55'">{{ a.action }}</strong>
+                <span>{{ a.symbol }}</span>
+                <small>{{ a.status }}</small>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
     <aside v-if="decisionOpen" class="floating-glass-window floating-decision-window">
       <div class="floating-window-head">
         <span>decision report</span>
@@ -427,9 +461,16 @@ const selectedRun = ref(null);
 const terminalOpen = ref(false);
 const sourcesOpen = ref(false);
 const decisionOpen = ref(false);
+const researchRunsOpen = ref(false);
+const planHistoryOpen = ref(false);
+const researchWindowPositions = ref({
+  runs: { x: 0, y: 0 },
+  plans: { x: 0, y: 0 },
+});
 const running = ref(false);
 const error = ref('');
 let pollTimer = null;
+let researchWindowDrag = null;
 
 const latestSignals = computed(() => snapshots.value[0]?.signals || []);
 const latestReport = computed(() => reports.value[0] || null);
@@ -680,7 +721,40 @@ function selectRun(run) {
 }
 
 onMounted(load);
-onUnmounted(clearPolling);
+onUnmounted(() => {
+  clearPolling();
+  window.removeEventListener('pointermove', onResearchWindowDrag);
+});
+
+function startResearchWindowDrag(event, windowKey) {
+  if (event.target?.closest?.('button')) return;
+  researchWindowDrag = {
+    windowKey,
+    startX: event.clientX,
+    startY: event.clientY,
+    originX: researchWindowPositions.value[windowKey].x,
+    originY: researchWindowPositions.value[windowKey].y,
+  };
+  window.addEventListener('pointermove', onResearchWindowDrag);
+  window.addEventListener('pointerup', stopResearchWindowDrag, { once: true });
+}
+
+function onResearchWindowDrag(event) {
+  if (!researchWindowDrag) return;
+  const { windowKey, startX, startY, originX, originY } = researchWindowDrag;
+  researchWindowPositions.value = {
+    ...researchWindowPositions.value,
+    [windowKey]: {
+      x: originX + event.clientX - startX,
+      y: originY + event.clientY - startY,
+    },
+  };
+}
+
+function stopResearchWindowDrag() {
+  researchWindowDrag = null;
+  window.removeEventListener('pointermove', onResearchWindowDrag);
+}
 
 function evidenceLine(action) {
   const evidence = action.evidence;

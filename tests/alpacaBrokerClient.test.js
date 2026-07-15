@@ -16,6 +16,7 @@ migrate();
 
 const userRepo = require('../src/db/repositories/userRepo');
 const brokerAccountRepo = require('../src/db/repositories/brokerAccountRepo');
+const settingsRepo = require('../src/db/repositories/settingsRepo');
 const providerConfigService = require('../src/services/providerConfigService');
 const AlpacaBrokerClient = require('../src/services/broker/AlpacaBrokerClient');
 
@@ -114,6 +115,86 @@ describe('AlpacaBrokerClient', () => {
       status: 'filled',
       fillPrice: 14.25,
     });
+  });
+
+  it('submits Alpaca fractional quantities only after fractionable asset confirmation', async () => {
+    const user = createUser();
+    settingsRepo.update(user.id, {
+      fractionalTradingEnabled: 1,
+      fractionalMinNotionalUsd: 1,
+      maxBuyOrderNotionalUsd: 20,
+    });
+    const submittedOrders = [];
+    const assetLookups = [];
+    providerConfigService.saveProvider(user.id, 'alpaca', {
+      keyId: 'ak-fractional',
+      secretKey: 'secret-fractional',
+      paper: 'true',
+    });
+
+    const broker = new AlpacaBrokerClient({
+      userId: user.id,
+      clientFactory: () => ({
+        getAccount: async () => ({ cash: '1000', buying_power: '1000', status: 'ACTIVE' }),
+        getAsset: async (symbol) => {
+          assetLookups.push(symbol);
+          return { symbol, tradable: true, fractionable: true };
+        },
+        createOrder: async (order) => {
+          submittedOrders.push(order);
+          return {
+            id: 'alpaca-fractional-order-1',
+            status: 'filled',
+            filled_avg_price: '20',
+          };
+        },
+      }),
+    });
+
+    const result = await broker.placeMarketOrder({
+      symbol: 'aapl',
+      side: 'buy',
+      quantity: 0.25,
+      price: 20,
+      clientOrderId: 'fractional-1',
+    });
+
+    expect(assetLookups).toEqual(['AAPL']);
+    expect(submittedOrders[0]).toMatchObject({
+      symbol: 'AAPL',
+      qty: '0.25',
+      side: 'buy',
+      type: 'market',
+      time_in_force: 'day',
+    });
+    expect(result.status).toBe('filled');
+  });
+
+  it('rejects fractional orders when Alpaca reports the asset is not fractionable', async () => {
+    const user = createUser();
+    providerConfigService.saveProvider(user.id, 'alpaca', {
+      keyId: 'ak-not-fractionable',
+      secretKey: 'secret-not-fractionable',
+      paper: 'true',
+    });
+
+    const broker = new AlpacaBrokerClient({
+      userId: user.id,
+      clientFactory: () => ({
+        getAccount: async () => ({ cash: '1000', buying_power: '1000', status: 'ACTIVE' }),
+        getAsset: async () => ({ symbol: 'XYZ', tradable: true, fractionable: false }),
+        createOrder: async () => {
+          throw new Error('createOrder should not be called for non-fractionable assets');
+        },
+      }),
+    });
+
+    await expect(broker.placeMarketOrder({
+      symbol: 'XYZ',
+      side: 'buy',
+      quantity: 0.25,
+      price: 20,
+    })).rejects.toThrow(/not fractionable/);
   });
 
   it('creates new default broker accounts as alpaca accounts', () => {

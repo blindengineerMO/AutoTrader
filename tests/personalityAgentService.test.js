@@ -17,6 +17,9 @@ const researchRepo = require('../src/db/repositories/researchRepo');
 const researchSourceRepo = require('../src/db/repositories/researchSourceRepo');
 const watcherAgentRepo = require('../src/db/repositories/watcherAgentRepo');
 const settingsRepo = require('../src/db/repositories/settingsRepo');
+const brokerAccountRepo = require('../src/db/repositories/brokerAccountRepo');
+const positionRepo = require('../src/db/repositories/positionRepo');
+const agentAffinityRepo = require('../src/db/repositories/agentAffinityRepo');
 const personalityAgents = require('../src/services/personalityAgentService');
 const brainMesh = require('../src/services/brainMeshService');
 const aiClient = require('../src/services/strategy/aiClient');
@@ -38,6 +41,15 @@ describe('personalityAgentService', () => {
         { symbol: 'XLE', localAiScore: 65, changePct: 1.1, volatilityPct: 1.2, theme: 'energy', price: 50 },
         { symbol: 'AMZN', localAiScore: 74, changePct: 1.6, volatilityPct: 1.9, theme: 'cloud+ecommerce', price: 80 },
       ],
+    });
+    const account = brokerAccountRepo.ensureDefault(user.id);
+    positionRepo.applyFill({
+      userId: user.id,
+      brokerAccountId: account.id,
+      symbol: 'F',
+      side: 'buy',
+      quantity: 2,
+      fillPrice: 14,
     });
 
     const seeded = personalityAgents.ensureDefaultAgents(user.id);
@@ -77,6 +89,13 @@ describe('personalityAgentService', () => {
     expect(run.summary.finalRecommendations.length).toBeGreaterThan(0);
     expect(run.conversation_id).toMatch(/^bc_/);
     expect(run.summary.decisionFrameworkVersion).toBe('agent-decision-tree-v1');
+    expect(run.summary.ownedPositionReviews.map((review) => review.symbol)).toContain('F');
+    expect(run.summary.ownedPositionReviews.find((review) => review.symbol === 'F')).toMatchObject({
+      reviewType: 'owned-position',
+      positionAction: expect.stringMatching(/buy_more|hold|sell/),
+      ownedPosition: expect.objectContaining({ quantity: 2, avgCostUsd: 14 }),
+    });
+    expect(run.recommendations.some((rec) => rec.symbol === 'F' && rec.reviewType === 'owned-position')).toBe(true);
     expect(run.recommendations[0].evidence.decisionTree.version).toBe('agent-decision-tree-v1');
     expect(run.recommendations[0].evidence.decisionObject.requiredConditions.length).toBeGreaterThan(0);
     expect(run.recommendations[0].evidence.decisionTree.gates.map((gate) => gate.name)).toEqual(expect.arrayContaining([
@@ -142,6 +161,35 @@ describe('personalityAgentService', () => {
 
     expect(nvdaChallenged.consensusScore).toBeLessThan(msftChallenged.consensusScore);
     expect(nvdaChallenged.consensusScore).toBeLessThan(nvdaBaseline.consensusScore);
+  });
+
+  it('buildDebateRounds prefers the highest-affinity challenger for the topic, and skips a proven low-value pairing', () => {
+    const agents = [
+      { id: 'agent-a', slug: 'agent-a', name: 'Agent A', brain_id: 'agent.personality.agent-a', bias: {} },
+      { id: 'agent-b', slug: 'agent-b', name: 'Agent B', brain_id: 'agent.personality.agent-b', bias: { factors: { riskPenalty: 0.2 } } },
+      { id: 'agent-c', slug: 'agent-c', name: 'Agent C', brain_id: 'agent.personality.agent-c', bias: {} },
+    ];
+    const recommendations = [
+      { agentId: 'agent-a', symbol: 'NVDA', action: 'buy', conviction: 50, evidence: { signal: { theme: 'semiconductors' }, challengePoints: ['thin evidence'] } },
+      { agentId: 'agent-b', symbol: 'NVDA', action: 'watch', conviction: 40, evidence: { signal: { theme: 'semiconductors' } } },
+      { agentId: 'agent-c', symbol: 'NVDA', action: 'watch', conviction: 30, evidence: { signal: { theme: 'semiconductors' } } },
+    ];
+
+    const baseline = personalityAgents.buildDebateRounds(agents, recommendations);
+    expect(baseline).toHaveLength(1);
+    expect(baseline[0].challengerAgentId).toBe('agent-b');
+
+    for (let i = 0; i < 10; i += 1) {
+      agentAffinityRepo.recordChallengeOutcome({ slugA: 'agent-a', slugB: 'agent-b', topic: 'semiconductors', upheld: false });
+    }
+    const afterOverruled = personalityAgents.buildDebateRounds(agents, recommendations);
+    expect(afterOverruled[0].challengerAgentId).toBe('agent-c');
+
+    for (let i = 0; i < 10; i += 1) {
+      agentAffinityRepo.recordChallengeOutcome({ slugA: 'agent-a', slugB: 'agent-c', topic: 'semiconductors', upheld: false });
+    }
+    const allProvenLow = personalityAgents.buildDebateRounds(agents, recommendations);
+    expect(['agent-b', 'agent-c']).toContain(allProvenLow[0].challengerAgentId);
   });
 
   it('gives a source credibility bump when its owning agent backed a winning consensus recommendation', async () => {

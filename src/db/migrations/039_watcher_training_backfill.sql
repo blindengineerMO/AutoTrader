@@ -1,0 +1,1 @@
+ALTER TABLE user_settings ADD COLUMN watcher_training_backfill_30d_completed_at TEXT;

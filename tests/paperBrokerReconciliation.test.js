@@ -15,6 +15,7 @@ migrate();
 const userRepo = require('../src/db/repositories/userRepo');
 const brokerAccountRepo = require('../src/db/repositories/brokerAccountRepo');
 const positionRepo = require('../src/db/repositories/positionRepo');
+const settingsRepo = require('../src/db/repositories/settingsRepo');
 const specRepo = require('../src/db/repositories/specResearchRepo');
 const PaperBrokerClient = require('../src/services/broker/PaperBrokerClient');
 const { reconcilePaperRun } = require('../src/services/spec/reconciliationService');
@@ -30,6 +31,7 @@ describe('paper broker reconciliation', () => {
       maxTradesPerSymbolPer24h: 3,
     });
     userId = user.id;
+    settingsRepo.update(userId, { maxBuyOrderNotionalUsd: 500 });
   });
 
   it('submits paper orders idempotently and reconciles filled positions', async () => {

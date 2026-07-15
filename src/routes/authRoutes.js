@@ -11,14 +11,7 @@ const credsSchema = z.object({
 });
 
 router.post('/register', async (req, res) => {
-  const parsed = credsSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid input' });
-  try {
-    const result = await authService.register(parsed.data);
-    res.status(201).json(result);
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
+  res.status(410).json({ error: 'Public registration is disabled. An admin must create subscriber accounts until signup billing is available.' });
 });
 
 router.post('/login', async (req, res) => {

@@ -7,6 +7,12 @@ const logger = require('../utils/logger');
 
 const BEHAVIOR_AGENT_ID = 'agent.behavior.supervisor';
 const GRADE_HISTORY_LIMIT = 20;
+const MIN_GRADES_FOR_LEARNING = 3;
+const LEARNING_ACCURACY_UP = 0.6;
+const LEARNING_ACCURACY_DOWN = 0.4;
+const LEARNING_WEIGHT_STEP = 0.1;
+const LEARNING_WEIGHT_MIN = 0.5;
+const LEARNING_WEIGHT_MAX = 1.5;
 
 function todayIsoDate() {
   return new Date().toISOString().slice(0, 10);
@@ -39,7 +45,43 @@ async function runDailyGrading(userId, { tradingDay = todayIsoDate() } = {}) {
       logger.error('Failed to grade watcher research run', { userId, runId: run.id, symbol: run.symbol, error: error.message });
     }
   }
+
+  try {
+    updateWatcherLearningWeights(userId);
+  } catch (error) {
+    logger.warn('Failed to update watcher learning weights', { userId, error: error.message });
+  }
+
   return grades;
+}
+
+function updateWatcherLearningWeights(userId) {
+  const updates = [];
+  for (const watcherAgent of watcherAgentRepo.listActiveByUser(userId)) {
+    const scorecard = watcherAgentRepo.getScorecard(watcherAgent.id);
+    const graded = (scorecard?.praiseCount || 0) + (scorecard?.punishCount || 0);
+    if (graded < MIN_GRADES_FOR_LEARNING) continue;
+
+    const accuracy = scorecard.praiseCount / graded;
+    let weight = watcherAgent.learning_weight ?? 1;
+    if (accuracy >= LEARNING_ACCURACY_UP) weight *= 1 + LEARNING_WEIGHT_STEP;
+    else if (accuracy <= LEARNING_ACCURACY_DOWN) weight *= 1 - LEARNING_WEIGHT_STEP;
+    else continue;
+    weight = Math.min(LEARNING_WEIGHT_MAX, Math.max(LEARNING_WEIGHT_MIN, Number(weight.toFixed(4))));
+    if (weight === watcherAgent.learning_weight) continue;
+
+    watcherAgentRepo.updateLearningWeight(watcherAgent.id, weight);
+    updates.push({ watcherAgentId: watcherAgent.id, symbol: watcherAgent.symbol, weight, accuracy });
+    brainMesh.tell({
+      from: BEHAVIOR_AGENT_ID,
+      to: watcherAgent.brain_id,
+      kind: 'event',
+      op: 'watcher.learning.updated',
+      ctx: { userId },
+      body: { symbol: watcherAgent.symbol, learningWeight: weight, accuracy: Number(accuracy.toFixed(3)), graded },
+    });
+  }
+  return updates;
 }
 
 function gradeResearchRun(userId, run, quoteBySymbol) {
@@ -113,4 +155,5 @@ function pushFindingToCompanyIntelligence(userId, watcherAgent, grade) {
 module.exports = {
   BEHAVIOR_AGENT_ID,
   runDailyGrading,
+  updateWatcherLearningWeights,
 };

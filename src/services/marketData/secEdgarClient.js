@@ -1,5 +1,6 @@
 const logger = require('../../utils/logger');
 const { config } = require('../../config');
+const { resilientFetch } = require('../../utils/resilientFetch');
 
 const TICKERS_URL = 'https://www.sec.gov/files/company_tickers.json';
 const FACTS_URL = (cik) => `https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`;
@@ -38,12 +39,12 @@ function requireUserAgent(overrideUserAgent) {
 
 async function fetchJson(url, { userAgent } = {}) {
   const resolvedUserAgent = requireUserAgent(userAgent);
-  const res = await fetch(url, {
+  const res = await resilientFetch(url, {
     headers: {
       'User-Agent': resolvedUserAgent,
       Accept: 'application/json',
     },
-  });
+  }, { bucket: 'sec-edgar' });
   if (!res.ok) throw new Error(`SEC EDGAR request failed: ${res.status} ${url}`);
   return res.json();
 }

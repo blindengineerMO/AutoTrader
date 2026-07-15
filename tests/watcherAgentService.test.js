@@ -13,6 +13,7 @@ const migrate = require('../src/db/migrate');
 migrate();
 
 const userRepo = require('../src/db/repositories/userRepo');
+const settingsRepo = require('../src/db/repositories/settingsRepo');
 const watcherAgentRepo = require('../src/db/repositories/watcherAgentRepo');
 const watcherAgentService = require('../src/services/watcherAgentService');
 const brainMesh = require('../src/services/brainMeshService');
@@ -83,6 +84,16 @@ describe('watcherAgentService.ensureWatcherAgent', () => {
   it('throws when userId or symbol is missing', () => {
     expect(() => watcherAgentService.ensureWatcherAgent(null, { symbol: 'AAA' })).toThrow();
     expect(() => watcherAgentService.ensureWatcherAgent(1, {})).toThrow();
+  });
+
+  it('does not create watcher agents for excluded symbols', () => {
+    const userId = newUser();
+    settingsRepo.addExcludedSymbol(userId, { symbol: 'NOPE', reason: 'Alpaca reports non-tradable.' });
+
+    const agent = watcherAgentService.ensureWatcherAgent(userId, { symbol: 'NOPE', companyName: 'Nope Co', price: 5 });
+
+    expect(agent).toBeNull();
+    expect(watcherAgentRepo.listActiveByUser(userId)).toHaveLength(0);
   });
 });
 
@@ -194,5 +205,31 @@ describe('watcherAgentRepo scorecard', () => {
     const scorecard = watcherAgentRepo.getScorecard(agent.id);
     expect(scorecard.totalGraded).toBe(0);
     expect(scorecard.ratio).toBeNull();
+  });
+});
+
+describe('watcherAgentService.runThirtyDayTrainingBackfill', () => {
+  it('creates and grades historical watcher runs once unless forced', async () => {
+    const userId = newUser();
+    const agent = watcherAgentService.ensureWatcherAgent(userId, { symbol: 'HIST', companyName: 'History Co', price: 10 });
+    const closes = Array.from({ length: 34 }, (_, i) => 10 + i * 0.1);
+    const quoteProvider = {
+      getDailyCloses: vi.fn().mockResolvedValue(closes),
+    };
+
+    const first = await watcherAgentService.runThirtyDayTrainingBackfill(userId, { quoteProvider, days: 30 });
+    const second = await watcherAgentService.runThirtyDayTrainingBackfill(userId, { quoteProvider, days: 30 });
+    const forced = await watcherAgentService.runThirtyDayTrainingBackfill(userId, { quoteProvider, days: 30, force: true });
+    const runs = watcherAgentRepo.listResearchRuns(agent.id, 100);
+    const scorecard = watcherAgentRepo.getScorecard(agent.id);
+
+    expect(first.ran).toBe(true);
+    expect(first.generatedRuns).toBeGreaterThan(20);
+    expect(first.generatedRuns).toBe(first.gradesCreated);
+    expect(second).toMatchObject({ ran: false, reason: 'already-completed' });
+    expect(forced.ran).toBe(true);
+    expect(runs.length).toBe(first.generatedRuns + forced.generatedRuns);
+    expect(runs.every((run) => run.graded === 1)).toBe(true);
+    expect(scorecard.totalGraded).toBe(runs.length);
   });
 });

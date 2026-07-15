@@ -93,6 +93,46 @@ describe('chatResearchService', () => {
     expect(normalized.followUpQueries).toEqual(['"Lockheed Martin" defense contract award']);
   });
 
+  it('repairs malformed Ollama JSON during article comprehension', async () => {
+    config.duckAiResearch.enabled = false;
+    vi.spyOn(global, 'fetch').mockImplementation(async (url) => {
+      const target = String(url);
+      if (target.endsWith('/api/tags')) {
+        return jsonResponse({ models: [{ name: 'llama3.1', model: 'llama3.1', capabilities: ['completion'] }] });
+      }
+      if (target.endsWith('/api/chat')) {
+        return jsonResponse({
+          message: {
+            content: `{
+              "reasoning": "CNBC says "India inflation" moved lower and oil remains the key watch item.",
+              "inferredCompanies": [
+                { "name": "Exxon Mobil", "symbol": "XOM", "reason": "Large energy exposure may be sensitive to oil availability and price changes." }
+              ],
+              "followUpQueries": ["Exxon Mobil India oil inflation earnings exposure"]
+            }
+
+            Local note: verify against crawled evidence.`,
+          },
+        });
+      }
+      throw new Error(`Unexpected fetch: ${target}`);
+    });
+
+    const result = await chatResearch.runArticleComprehension({
+      article: {
+        title: 'India inflation cools as oil risk remains',
+        url: 'https://www.cnbc.com/2026/07/13/india-june-inflation-oil-food-iran-war.html',
+        excerpt: 'India inflation cooled, while oil and food prices remain important risks.',
+      },
+      onEvent: () => {},
+    });
+
+    expect(result.provider).toBe('ollama');
+    expect(result.reasoning).toContain('India inflation');
+    expect(result.inferredCompanies[0]).toMatchObject({ name: 'Exxon Mobil', symbol: 'XOM' });
+    expect(result.followUpQueries).toEqual(['Exxon Mobil India oil inflation earnings exposure']);
+  });
+
   it('builds Duck.ai web prompts and extracts JSON from webapp text', () => {
     const prompt = duckAiWebClient.buildDuckAiPrompt({
       systemPrompt: 'Return market research JSON.',

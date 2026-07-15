@@ -1,4 +1,5 @@
 const { Ollama } = require('ollama');
+const { jsonrepair } = require('jsonrepair');
 const { config } = require('../config');
 
 const MODEL_CACHE_TTL_MS = 60_000;
@@ -29,7 +30,7 @@ async function askOllamaJson({
     timeoutMs,
     'Ollama request'
   );
-  return JSON.parse(extractJsonObject(data.message?.content || data.response || '{}'));
+  return parseOllamaJsonResponse(data.message?.content || data.response || '{}');
 }
 
 async function askOllamaJsonWithTools({
@@ -92,7 +93,7 @@ The selected local Ollama model does not advertise tool-calling support. Use onl
     const toolCalls = Array.isArray(assistantMessage.tool_calls) ? assistantMessage.tool_calls : [];
 
     if (!toolCalls.length) {
-      return JSON.parse(extractJsonObject(assistantMessage.content || data.response || '{}'));
+      return parseOllamaJsonResponse(assistantMessage.content || data.response || '{}');
     }
 
     messages.push({
@@ -205,11 +206,23 @@ function buildOllamaHost(baseUrl = config.ollamaBaseUrl) {
 
 function extractJsonObject(text) {
   const raw = String(text || '').trim();
-  if (raw.startsWith('{')) return raw;
   const start = raw.indexOf('{');
   const end = raw.lastIndexOf('}');
   if (start === -1 || end === -1 || end <= start) return '{}';
   return raw.slice(start, end + 1);
+}
+
+function parseOllamaJsonResponse(text) {
+  const extracted = extractJsonObject(text);
+  try {
+    return JSON.parse(extracted);
+  } catch (parseError) {
+    try {
+      return JSON.parse(jsonrepair(extracted));
+    } catch (repairError) {
+      throw new Error(`Ollama returned malformed JSON: ${parseError.message}; repair failed: ${repairError.message}`);
+    }
+  }
 }
 
 function clearOllamaModelCache() {
@@ -236,6 +249,7 @@ module.exports = {
   buildOllamaOptions,
   getOllamaClient,
   clearOllamaModelCache,
+  parseOllamaJsonResponse,
   buildOllamaHost,
   buildOllamaApiUrl,
   buildOllamaOpenAiBaseUrl,

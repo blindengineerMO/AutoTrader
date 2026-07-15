@@ -2,6 +2,8 @@ const Alpaca = require('@alpacahq/alpaca-trade-api');
 const BrokerClient = require('./BrokerClient');
 const { config } = require('../../config');
 const providerCredentialRepo = require('../../db/repositories/providerCredentialRepo');
+const settingsRepo = require('../../db/repositories/settingsRepo');
+const alpacaRules = require('../alpacaRulesService');
 
 class AlpacaBrokerClient extends BrokerClient {
   constructor({ userId, clientFactory = null } = {}) {
@@ -52,13 +54,14 @@ class AlpacaBrokerClient extends BrokerClient {
     return {
       cashUsd: money(this.lastAccount.cash),
       buyingPowerUsd: money(this.lastAccount.buying_power),
+      equityUsd: money(this.lastAccount.equity),
       status: this.lastAccount.status || null,
       currency: this.lastAccount.currency || 'USD',
       raw: this.lastAccount,
     };
   }
 
-  async placeMarketOrder({ symbol, side, quantity, clientOrderId = null }) {
+  async placeMarketOrder({ symbol, side, quantity, price = null, clientOrderId = null }) {
     if (!this.client) await this.connect();
     const normalizedSymbol = normalizeSymbol(symbol);
     const normalizedSide = normalizeSide(side);
@@ -67,9 +70,41 @@ class AlpacaBrokerClient extends BrokerClient {
     if (!normalizedSide) throw new Error('Order side must be buy or sell.');
     if (!Number.isFinite(qty) || qty <= 0) throw new Error('Quantity must be positive.');
 
+    const settings = this.userId ? settingsRepo.get(this.userId) : null;
+    const decimalPlaces = alpacaRules.decimalPlaces(qty);
+    const fractional = alpacaRules.isFractionalQuantity(qty);
+    if (decimalPlaces > 9) throw new Error('Fractional quantity exceeds Alpaca 9 decimal limit.');
+    if (fractional && settings?.fractional_trading_enabled === 0) {
+      throw new Error('Fractional Alpaca orders are disabled in Settings.');
+    }
+
+    let asset = null;
+    if (fractional) {
+      if (typeof this.client.getAsset !== 'function') {
+        throw new Error('Cannot verify Alpaca fractional eligibility because getAsset is unavailable.');
+      }
+      asset = await this.client.getAsset(normalizedSymbol);
+      if (asset?.tradable === false) throw new Error('Alpaca asset is not tradable.');
+      if (asset?.fractionable !== true) throw new Error('Alpaca asset is not fractionable.');
+    }
+
+    const normalizedQty = alpacaRules.roundQuantity(qty);
+    const estimatedPrice = Number(price || 0);
+    const evaluation = alpacaRules.evaluateOrder({
+      userId: this.userId,
+      symbol: normalizedSymbol,
+      side: normalizedSide,
+      quantity: normalizedQty,
+      price: estimatedPrice,
+      asset,
+    });
+    if (estimatedPrice > 0 && !evaluation.allowed) {
+      throw new Error(`Alpaca order rules blocked trade: ${evaluation.failed.join(', ')}`);
+    }
+
     const order = await this.client.createOrder({
       symbol: normalizedSymbol,
-      qty: String(qty),
+      qty: formatQuantity(normalizedQty),
       side: normalizedSide,
       type: 'market',
       time_in_force: 'day',
@@ -119,6 +154,10 @@ function normalizeSide(side) {
   const normalized = String(side || '').trim().toLowerCase();
   if (normalized === 'buy' || normalized === 'sell') return normalized;
   return null;
+}
+
+function formatQuantity(quantity) {
+  return Number(quantity).toFixed(9).replace(/\.?0+$/, '');
 }
 
 function normalizeStatus(status) {

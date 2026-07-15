@@ -101,12 +101,12 @@ const NEGATIVE_COMBINATIONS = [
 
 const LEXICON = loadWeightLexicon();
 
-function scoreCandidateEvidence({ candidate = {}, news = { items: [] }, learned = { observations: [] }, chatResearch = null } = {}) {
+function scoreCandidateEvidence({ candidate = {}, news = { items: [] }, learned = { observations: [] }, chatResearch = null, learnedCategoryMultipliers = {} } = {}) {
   const documents = buildDocuments({ news, learned, chatResearch });
   const seenEventKeys = new Map();
   const events = [];
   for (const document of documents) {
-    const scored = scoreDocumentForCandidate(document, candidate, seenEventKeys);
+    const scored = scoreDocumentForCandidate(document, candidate, seenEventKeys, { learnedCategoryMultipliers });
     events.push(...scored.events);
   }
 
@@ -142,7 +142,7 @@ function scoreDocumentFinancialEvents({ text = '', title = '', url = '', sourceT
   };
 }
 
-function scoreDocumentForCandidate(document, candidate, seenEventKeys, { generic = false } = {}) {
+function scoreDocumentForCandidate(document, candidate, seenEventKeys, { generic = false, learnedCategoryMultipliers = {} } = {}) {
   const text = cleanText(`${document.title || ''}. ${document.text || ''}`);
   if (!text) return { events: [] };
   const sourceType = inferSourceType(document);
@@ -164,6 +164,7 @@ function scoreDocumentForCandidate(document, candidate, seenEventKeys, { generic
       const surprise = surpriseMultiplier(clause.text, baseWeight);
       const timeDecay = timeDecayMultiplier(document.publishedAt || document.created_at);
       const penalties = penaltiesForClause(clause.text, document, novelty);
+      const learnedCategoryMultiplier = learnedCategoryMultipliers[entry.category] ?? 1;
       const eventScore = baseWeight
         * sourceReliability
         * CERTAINTY_MULTIPLIERS[certainty]
@@ -173,6 +174,7 @@ function scoreDocumentForCandidate(document, candidate, seenEventKeys, { generic
         * surprise
         * timeDecay
         * historicalSourceAccuracy
+        * learnedCategoryMultiplier
         * clause.multiplier;
       const finalScore = round(eventScore - penalties.total);
       if (Math.abs(finalScore) < 0.05) continue;
@@ -212,6 +214,7 @@ function scoreDocumentForCandidate(document, candidate, seenEventKeys, { generic
           surprise_multiplier: surprise,
           time_decay: timeDecay,
           historical_source_accuracy: historicalSourceAccuracy,
+          learned_category_multiplier: learnedCategoryMultiplier,
         },
         penalties,
         final_event_score: finalScore,
@@ -383,8 +386,70 @@ function companyRelevanceMultiplier({ candidate, text, url }) {
   if (company && normalized.includes(company)) return 0.95;
   const aliases = (candidate.discovery?.evidence || []).map((item) => item.reason || '').join(' ');
   if (aliases && aliases.split(/\W+/).some((word) => word.length > 4 && normalized.includes(word.toLowerCase()))) return 0.65;
-  if (candidate.theme && normalized.includes(String(candidate.theme).split('+')[0].toLowerCase())) return 0.55;
-  return 0.2;
+  const geoBoost = geographicRelevanceBoost({ candidate, normalized });
+  if (candidate.theme && normalized.includes(String(candidate.theme).split('+')[0].toLowerCase())) return Math.min(1, 0.55 + geoBoost);
+  return Math.min(1, 0.2 + geoBoost);
+}
+
+// Headquarters disruptions ripple through the whole company; supply-chain
+// (manufacturing) sites hit production directly; customer/retail exposure is
+// revenue-side and more indirect. Locations with no known exposure type
+// (bare `primaryLocations` entries) get the weakest weight.
+const EXPOSURE_TYPE_WEIGHT = {
+  headquarters: 0.45,
+  supply_chain: 0.4,
+  customer_market: 0.3,
+  retail: 0.25,
+  office: 0.2,
+  mentioned: 0.15,
+};
+
+const SEVERITY_MULTIPLIERS = [
+  { pattern: /catastrophic|devastating|widespread|state of emergency|nationwide/, multiplier: 1.3 },
+  { pattern: /major|severe|significant disruption|mass (casualty|casualties)/, multiplier: 1.15 },
+  { pattern: /minor|localized|contained|limited impact/, multiplier: 0.6 },
+];
+
+function geographicSeverityMultiplier(text) {
+  for (const { pattern, multiplier } of SEVERITY_MULTIPLIERS) {
+    if (pattern.test(text)) return multiplier;
+  }
+  return 1;
+}
+
+// When a location-coordinator profile is attached to the candidate and the event
+// text names a place where the company has geographic exposure, raise relevance
+// so geo events (war/disaster/strike/gas) correlate to geographically-exposed
+// companies even when the company isn't named in the event. Scaled by the type
+// of exposure (headquarters > supply chain > customer market > retail) and by
+// the event's apparent severity. Self-contained (no cross-service require) to
+// avoid a circular dependency with the crawler.
+function geographicRelevanceBoost({ candidate, normalized }) {
+  const profile = candidate.locationProfile;
+  if (!profile) return 0;
+
+  const weightByLocation = new Map();
+  const setWeight = (location, weight) => {
+    const term = normalize(location);
+    if (term.length < 3) return;
+    weightByLocation.set(term, Math.max(weightByLocation.get(term) || 0, weight));
+  };
+  for (const exposure of profile.exposures || []) {
+    setWeight(exposure.location, EXPOSURE_TYPE_WEIGHT[exposure.type] ?? EXPOSURE_TYPE_WEIGHT.mentioned);
+  }
+  for (const location of profile.manufacturing || []) setWeight(location, EXPOSURE_TYPE_WEIGHT.supply_chain);
+  for (const location of profile.topSalesRegions || []) setWeight(location, EXPOSURE_TYPE_WEIGHT.customer_market);
+  for (const location of profile.primaryLocations || []) {
+    const term = normalize(location);
+    if (term.length >= 3 && !weightByLocation.has(term)) weightByLocation.set(term, EXPOSURE_TYPE_WEIGHT.mentioned);
+  }
+
+  let matchedWeight = 0;
+  for (const [term, weight] of weightByLocation) {
+    if (normalized.includes(term)) matchedWeight = Math.max(matchedWeight, weight);
+  }
+  if (!matchedWeight) return 0;
+  return round(matchedWeight * geographicSeverityMultiplier(normalized));
 }
 
 function noveltyMultiplier({ document, entry, candidate, seenEventKeys }) {

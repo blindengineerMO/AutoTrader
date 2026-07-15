@@ -16,7 +16,9 @@ class MockBrokerClient extends BrokerClient {
   }
 
   async getAccountState() {
-    return { cashUsd: this.cashUsd, buyingPowerUsd: this.cashUsd };
+    // equityUsd omitted: this mock doesn't track position value, so callers
+    // fall back to cash + positionRepo cost basis for an equity estimate.
+    return { cashUsd: this.cashUsd, buyingPowerUsd: this.cashUsd, equityUsd: null };
   }
 
   async placeMarketOrder({ symbol, side, quantity, price }) {

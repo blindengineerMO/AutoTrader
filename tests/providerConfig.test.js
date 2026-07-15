@@ -44,14 +44,19 @@ describe('providerConfigService', () => {
     const providers = providerConfigService.listProviders(user.id);
     const keys = providers.map((provider) => provider.providerKey);
 
-    expect(keys).toEqual(expect.arrayContaining(['sec-edgar', 'census-bfs', 'census-bds', 'gdelt', 'openalex', 'openfda', 'reliefweb', 'nws-weather']));
+    expect(keys).toEqual(expect.arrayContaining(['sec-edgar', 'census-bfs', 'census-bds', 'census-retail', 'gdelt', 'openalex', 'openfda', 'bls', 'bea', 'eia', 'usda-ams', 'reliefweb', 'nws-weather']));
     expect(providers.find((provider) => provider.providerKey === 'sec-edgar').fields[0].key).toBe('userAgent');
     expect(providers.find((provider) => provider.providerKey === 'census-bfs').fields[0].key).toBe('apiKey');
     expect(providers.find((provider) => provider.providerKey === 'census-bds').fields[0].key).toBe('apiKey');
+    expect(providers.find((provider) => provider.providerKey === 'census-retail').fields[0].key).toBe('apiKey');
     expect(providers.find((provider) => provider.providerKey === 'gdelt').fields.map((field) => field.key)).toEqual(
       expect.arrayContaining(['enabled', 'maxRecords'])
     );
     expect(providers.find((provider) => provider.providerKey === 'reliefweb').fields[0].key).toBe('appName');
+    expect(providers.find((provider) => provider.providerKey === 'bls').fields[0].key).toBe('apiKey');
+    expect(providers.find((provider) => provider.providerKey === 'bea').fields[0].key).toBe('apiKey');
+    expect(providers.find((provider) => provider.providerKey === 'eia').fields[0].key).toBe('apiKey');
+    expect(providers.find((provider) => provider.providerKey === 'usda-ams').fields[0].key).toBe('apiKey');
     expect(providers.find((provider) => provider.providerKey === 'nws-weather').fields[0].key).toBe('userAgent');
   });
 
@@ -70,7 +75,7 @@ describe('providerConfigService', () => {
     expect(alpaca.providerType).toBe('broker');
     expect(alpaca.displayName).toBe('Alpaca');
     expect(alpaca.fields.map((field) => field.key)).toEqual(
-      expect.arrayContaining(['keyId', 'secretKey', 'paper', 'baseUrl'])
+      expect.arrayContaining(['keyId', 'secretKey', 'paper', 'baseUrl', 'brokerBaseUrl', 'brokerAccountId'])
     );
   });
 
@@ -88,5 +93,23 @@ describe('providerConfigService', () => {
     expect(ollama.providerType).toBe('ai');
     expect(ollama.envConfigured).toBe(true);
     expect(ollama.fields.map((field) => field.key)).toEqual(expect.arrayContaining(['baseUrl', 'model']));
+  });
+
+  it('exposes Stripe billing credentials for upcoming signup billing', () => {
+    const user = userRepo.createUser({
+      email: `stripe-provider-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+
+    const providers = providerConfigService.listProviders(user.id);
+    const stripe = providers.find((provider) => provider.providerKey === 'stripe');
+
+    expect(stripe).toBeDefined();
+    expect(stripe.providerType).toBe('billing');
+    expect(stripe.fields.map((field) => field.key)).toEqual(
+      expect.arrayContaining(['publishableKey', 'secretKey', 'webhookSecret', 'defaultPriceId', 'billingPortalReturnUrl'])
+    );
   });
 });

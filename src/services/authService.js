@@ -46,10 +46,12 @@ function verifyToken(token) {
 }
 
 function serializeUser(user) {
+  const role = user.role || 'user';
   return {
     id: user.id,
     email: user.email,
-    role: user.role || 'user',
+    role,
+    roleLabel: role === 'admin' ? 'Admin' : 'Subscriber',
     status: user.status || 'active',
     isAdmin: user.role === 'admin',
   };

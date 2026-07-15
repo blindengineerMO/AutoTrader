@@ -5,7 +5,7 @@
         <AppBackdrop />
         <aside class="side-nav" :class="{ collapsed: navCollapsed, 'mobile-open': mobileNavOpen }">
           <div class="side-nav-brand">
-            <router-link to="/" class="nav-brand-mark" @click="closeMobileNav">
+            <router-link to="/dashboard" class="nav-brand-mark" @click="closeMobileNav">
               <v-icon icon="mdi-hexagon-multiple-outline" size="22" />
               <span class="nav-brand-text">AUTOTRADER</span>
             </router-link>
@@ -28,38 +28,34 @@
             </router-link>
           </nav>
           <div class="side-nav-footer">
-            <div class="side-nav-operator" v-if="!navCollapsed">
+            <div class="side-nav-footer-actions">
+              <NotificationBell ref="notificationBell" @open="profileOpen = false" />
+              <button class="profile-trigger side-profile-trigger" type="button" @click="toggleProfile">
+                <span class="profile-avatar">{{ initials }}</span>
+              </button>
+              <button class="side-logout-button" type="button" title="Log out" @click="logout">
+                <v-icon icon="mdi-logout" size="17" />
+              </button>
+            </div>
+            <button class="side-nav-operator" type="button" :title="auth.user?.email" @click="toggleProfile">
+              <span class="text-[10px] uppercase text-white/35">operator</span>
+              <span class="text-xs text-white/65 truncate">{{ auth.user?.email }}</span>
+              <span class="text-[10px] uppercase text-accent mt-1">{{ auth.user?.roleLabel || (auth.isAdmin ? 'admin' : 'subscriber') }}</span>
+            </button>
+            <div v-if="profileOpen" class="profile-dropdown side-profile-dropdown glass-panel p-4" @click.self="profileOpen = false">
               <div class="text-[10px] uppercase text-white/35">operator</div>
-              <div class="text-xs text-white/65 truncate">{{ auth.user?.email }}</div>
-              <div v-if="auth.isAdmin" class="text-[10px] uppercase text-accent mt-1">admin</div>
+              <div class="text-xs text-white/75 truncate mb-3">{{ auth.user?.email }}</div>
+              <div class="text-[10px] uppercase text-accent mb-3">{{ auth.user?.roleLabel || (auth.isAdmin ? 'admin' : 'subscriber') }}</div>
+              <GlassButton variant="ghost" class="!w-full !py-2 !text-xs" @click="logout">Log out</GlassButton>
             </div>
           </div>
         </aside>
         <div v-if="mobileNavOpen" class="side-nav-scrim" @click="closeMobileNav" />
+        <button class="nav-mobile-launcher" type="button" @click="mobileNavOpen = !mobileNavOpen" aria-label="Toggle navigation">
+          <v-icon icon="mdi-menu" size="20" />
+        </button>
 
         <div class="app-content" :class="{ 'nav-collapsed': navCollapsed }">
-          <header class="top-bar">
-            <div class="top-bar-left">
-              <button class="nav-hamburger" type="button" @click="mobileNavOpen = !mobileNavOpen" aria-label="Toggle navigation">
-                <v-icon icon="mdi-menu" size="20" />
-              </button>
-              <span class="top-bar-title">{{ currentPageLabel }}</span>
-            </div>
-            <div class="top-bar-right">
-              <NotificationBell />
-              <div class="profile-menu">
-                <button class="profile-trigger" type="button" @click="profileOpen = !profileOpen">
-                  <span class="profile-avatar">{{ initials }}</span>
-                </button>
-                <div v-if="profileOpen" class="profile-dropdown glass-panel p-4" @click.self="profileOpen = false">
-                  <div class="text-[10px] uppercase text-white/35">operator</div>
-                  <div class="text-xs text-white/75 truncate mb-3">{{ auth.user?.email }}</div>
-                  <div v-if="auth.isAdmin" class="text-[10px] uppercase text-accent mb-3">admin workspace enabled</div>
-                  <GlassButton variant="ghost" class="!w-full !py-2 !text-xs" @click="logout">Log out</GlassButton>
-                </div>
-              </div>
-            </div>
-          </header>
           <v-main>
             <router-view />
           </v-main>
@@ -76,7 +72,7 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
+import { useRouter } from 'vue-router';
 import { useAuthStore } from './stores/auth';
 import GlassButton from './components/GlassButton.vue';
 import AppBackdrop from './components/AppBackdrop.vue';
@@ -84,14 +80,13 @@ import NotificationBell from './components/NotificationBell.vue';
 
 const auth = useAuthStore();
 const router = useRouter();
-const route = useRoute();
 
 onMounted(() => {
   if (auth.isAuthenticated) auth.fetchMe().catch(() => {});
 });
 
 const navItems = computed(() => [
-  { to: '/', label: 'Dashboard', icon: 'mdi-view-dashboard' },
+  { to: '/dashboard', label: 'Dashboard', icon: 'mdi-view-dashboard' },
   { to: '/research', label: 'Research', icon: 'mdi-radar' },
   { to: '/agents', label: 'Agents', icon: 'mdi-account-group' },
   { to: '/watchers', label: 'Watchers', icon: 'mdi-eye-outline' },
@@ -105,6 +100,7 @@ const navItems = computed(() => [
 const navCollapsed = ref(localStorage.getItem('autotrader.navCollapsed') === '1');
 const mobileNavOpen = ref(false);
 const profileOpen = ref(false);
+const notificationBell = ref(null);
 
 function toggleCollapse() {
   navCollapsed.value = !navCollapsed.value;
@@ -113,9 +109,14 @@ function toggleCollapse() {
 
 function closeMobileNav() {
   mobileNavOpen.value = false;
+  profileOpen.value = false;
 }
 
-const currentPageLabel = computed(() => navItems.value.find((item) => item.to === route.path)?.label || 'Autotrader');
+function toggleProfile() {
+  profileOpen.value = !profileOpen.value;
+  notificationBell.value?.close?.();
+  window.dispatchEvent(new CustomEvent('autotrader:close-notifications'));
+}
 
 const initials = computed(() => {
   const email = auth.user?.email || '';

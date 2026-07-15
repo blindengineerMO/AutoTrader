@@ -10,4 +10,9 @@ function startOfTodayUtc() {
   return `${now.toISOString().slice(0, 10)} 00:00:00`;
 }
 
-module.exports = { startOfTodayUtc };
+/** Formats a Date as SQLite's datetime('now') string ("YYYY-MM-DD HH:MM:SS", UTC) for safe >= / <= comparisons against those columns. */
+function toSqliteUtc(date) {
+  return date.toISOString().replace('T', ' ').slice(0, 19);
+}
+
+module.exports = { startOfTodayUtc, toSqliteUtc };

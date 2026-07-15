@@ -70,8 +70,13 @@ async function createUser({ email, password, role = 'user', status = 'active' })
   return serializeManagedUser(user);
 }
 
-function listUsers() {
-  return userRepo.list().map(serializeManagedUser);
+function listUsers(query = {}) {
+  if (!query || Object.keys(query).length === 0) return userRepo.list().map(serializeManagedUser);
+  const result = userRepo.query(query);
+  return {
+    ...result,
+    items: result.items.map(serializeManagedUser),
+  };
 }
 
 function getUser(id) {
@@ -99,6 +104,14 @@ async function resetPassword(id, password) {
   if (!password || String(password).length < 8) throw new Error('Password must be at least 8 characters');
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
   return serializeManagedUser(userRepo.updatePassword(user.id, passwordHash));
+}
+
+function deleteUser(id, { actorId } = {}) {
+  const user = getUser(id);
+  if (Number(actorId) === Number(user.id)) throw new Error('You cannot delete your own account');
+  assertNotRemovingLastAdmin(user, { role: 'user', status: 'disabled' });
+  userRepo.deleteUser(user.id);
+  return { deleted: true, id: user.id };
 }
 
 function assertNotRemovingLastAdmin(user, next) {
@@ -137,4 +150,5 @@ module.exports = {
   listUsers,
   updateUser,
   resetPassword,
+  deleteUser,
 };

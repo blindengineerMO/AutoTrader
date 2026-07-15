@@ -105,11 +105,25 @@ describe('company historical watch factors', () => {
       onEvent: () => {},
     });
 
-    expect(signal.brainModelKey).toBe('candidate-factor-scorer-v9-census-bds');
+    expect(signal.brainModelKey).toBe('candidate-factor-scorer-v33-consumer-goods-industry');
     expect(signal.evidence.featureInput.historicalWatchFactors).toBeGreaterThan(0.6);
     expect(signal.evidence.featureInput.secFilingHistory).toBe(0.44);
     expect(signal.evidence.featureInput.businessFormation).toBe(0.5);
     expect(signal.evidence.featureInput.businessDynamics).toBe(0.5);
+    expect(signal.evidence.featureInput.finvizScreener).toBe(0.5);
+    expect(signal.evidence.featureInput.tradingViewScreener).toBe(0.5);
+    expect(signal.evidence.featureInput.yahooFinanceScreener).toBe(0.5);
+    expect(signal.evidence.featureInput.nasdaqMarketResearch).toBe(0.5);
+    expect(signal.evidence.featureInput.marketBeatAnalyst).toBe(0.5);
+    expect(signal.evidence.featureInput.wallStreetZenQuant).toBe(0.5);
+    expect(signal.evidence.featureInput.finraCreditRisk).toBe(0.5);
+    expect(signal.evidence.featureInput.secOwnership).toBe(0.5);
+    expect(signal.evidence.featureInput.usaspendingAwards).toBe(0.5);
+    expect(signal.evidence.featureInput.dodContracts).toBe(0.5);
+    expect(signal.evidence.featureInput.forcedDisplacement).toBe(0.5);
+    expect(signal.evidence.featureInput.nuclearEvents).toBe(0.5);
+    expect(signal.evidence.featureInput.wildfires).toBe(0.5);
+    expect(signal.evidence.featureInput.droughtRisk).toBe(0.5);
     expect(signal.evidence.businessFormation.score).toBe(50);
     expect(signal.evidence.businessDynamics.score).toBe(50);
     expect(signal.evidence.historicalWatchFactors).toHaveLength(3);

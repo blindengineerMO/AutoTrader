@@ -6,6 +6,7 @@ const updateStmt = db.prepare(`
   SET kill_switch_engaged = @killSwitchEngaged,
       daily_loss_limit_usd = @dailyLossLimitUsd,
       max_trades_per_symbol_per_24h = @maxTradesPerSymbolPer24h,
+      day_trading_enabled = @dayTradingEnabled,
       research_cadence_cron = @researchCadenceCron,
       evaluation_cadence_cron = @evaluationCadenceCron,
       source_learning_enabled = @sourceLearningEnabled,
@@ -22,6 +23,11 @@ const updateStmt = db.prepare(`
       personality_tick_cadence_cron = @personalityTickCadenceCron,
       agent_local_learning_enabled = @agentLocalLearningEnabled,
       dashboard_layout_json = @dashboardLayoutJson,
+      excluded_symbols_json = @excludedSymbolsJson,
+      fractional_trading_enabled = @fractionalTradingEnabled,
+      fractional_min_notional_usd = @fractionalMinNotionalUsd,
+      max_buy_order_notional_usd = @maxBuyOrderNotionalUsd,
+      alpaca_statement_download_day = @alpacaStatementDownloadDay,
       updated_at = datetime('now')
   WHERE user_id = @userId
 `);
@@ -54,6 +60,9 @@ const markSimulationEvaluationStmt = db.prepare(`
 const markAgentRefreshStmt = db.prepare(`
   UPDATE user_settings SET agent_personality_last_refreshed_at = datetime('now'), updated_at = datetime('now') WHERE user_id = ?
 `);
+const markWatcherTrainingBackfillStmt = db.prepare(`
+  UPDATE user_settings SET watcher_training_backfill_30d_completed_at = datetime('now'), updated_at = datetime('now') WHERE user_id = ?
+`);
 
 // Auto-tripped switches, each independent of the manual kill_switch_engaged
 // flag and of each other — any one of them blocks new orders on its own.
@@ -67,7 +76,8 @@ const AUTO_KILL_SWITCHES = [
 ];
 
 function get(userId) {
-  return getByUser.get(userId);
+  const row = getByUser.get(userId);
+  return row ? hydrate(row) : row;
 }
 
 function assertKnownSwitch(switchName) {
@@ -118,6 +128,7 @@ function update(userId, patch) {
     killSwitchEngaged: patch.killSwitchEngaged ?? current.kill_switch_engaged,
     dailyLossLimitUsd: patch.dailyLossLimitUsd ?? current.daily_loss_limit_usd,
     maxTradesPerSymbolPer24h: patch.maxTradesPerSymbolPer24h ?? current.max_trades_per_symbol_per_24h,
+    dayTradingEnabled: patch.dayTradingEnabled ?? current.day_trading_enabled ?? 0,
     researchCadenceCron: patch.researchCadenceCron ?? current.research_cadence_cron,
     evaluationCadenceCron: patch.evaluationCadenceCron ?? current.evaluation_cadence_cron,
     sourceLearningEnabled: patch.sourceLearningEnabled ?? current.source_learning_enabled,
@@ -134,9 +145,52 @@ function update(userId, patch) {
     personalityTickCadenceCron: patch.personalityTickCadenceCron ?? current.personality_tick_cadence_cron,
     agentLocalLearningEnabled: patch.agentLocalLearningEnabled ?? current.agent_local_learning_enabled,
     dashboardLayoutJson: patch.dashboardLayoutJson ?? current.dashboard_layout_json,
+    excludedSymbolsJson: patch.excludedSymbolsJson ?? current.excluded_symbols_json ?? '[]',
+    fractionalTradingEnabled: patch.fractionalTradingEnabled ?? current.fractional_trading_enabled ?? 1,
+    fractionalMinNotionalUsd: patch.fractionalMinNotionalUsd ?? current.fractional_min_notional_usd ?? 1,
+    maxBuyOrderNotionalUsd: patch.maxBuyOrderNotionalUsd ?? current.max_buy_order_notional_usd ?? 100,
+    alpacaStatementDownloadDay: patch.alpacaStatementDownloadDay ?? current.alpaca_statement_download_day ?? 5,
   };
   updateStmt.run(merged);
   return get(userId);
+}
+
+function getExcludedSymbols(userId) {
+  if (!userId) return [];
+  return parseExcludedSymbols(get(userId)?.excluded_symbols_json);
+}
+
+function isSymbolExcluded(userId, symbol) {
+  if (!userId) return false;
+  const normalized = normalizeSymbol(symbol);
+  if (!normalized) return false;
+  return getExcludedSymbols(userId).some((entry) => entry.symbol === normalized);
+}
+
+function setExcludedSymbols(userId, entries) {
+  if (!userId) throw new Error('userId is required to set excluded symbols');
+  const normalized = normalizeExcludedSymbols(entries);
+  return update(userId, { excludedSymbolsJson: JSON.stringify(normalized) });
+}
+
+function addExcludedSymbol(userId, entry) {
+  if (!userId) return null;
+  const normalized = normalizeExcludedSymbol(entry);
+  if (!normalized) return get(userId);
+  const existing = getExcludedSymbols(userId);
+  const merged = [
+    normalized,
+    ...existing.filter((item) => item.symbol !== normalized.symbol),
+  ].sort((a, b) => a.symbol.localeCompare(b.symbol));
+  return update(userId, { excludedSymbolsJson: JSON.stringify(merged) });
+}
+
+function removeExcludedSymbol(userId, symbol) {
+  if (!userId) return null;
+  const normalized = normalizeSymbol(symbol);
+  if (!normalized) return get(userId);
+  const filtered = getExcludedSymbols(userId).filter((entry) => entry.symbol !== normalized);
+  return update(userId, { excludedSymbolsJson: JSON.stringify(filtered) });
 }
 
 function setKillSwitch(userId, engaged, triggeredBy, reason) {
@@ -156,6 +210,11 @@ module.exports = {
   engageAutoKillSwitch,
   clearAutoKillSwitch,
   isAnyKillSwitchEngaged,
+  getExcludedSymbols,
+  isSymbolExcluded,
+  setExcludedSymbols,
+  addExcludedSymbol,
+  removeExcludedSymbol,
   markSimulationStarted: (userId) => {
     markSimulationStartedStmt.run(userId);
     return get(userId);
@@ -176,4 +235,57 @@ module.exports = {
     markAgentRefreshStmt.run(userId);
     return get(userId);
   },
+  markWatcherTrainingBackfill30d: (userId) => {
+    markWatcherTrainingBackfillStmt.run(userId);
+    return get(userId);
+  },
 };
+
+function hydrate(row) {
+  return {
+    ...row,
+    excluded_symbols_json: row.excluded_symbols_json || '[]',
+    excluded_symbols: parseExcludedSymbols(row.excluded_symbols_json),
+  };
+}
+
+function parseExcludedSymbols(value) {
+  try {
+    return normalizeExcludedSymbols(JSON.parse(value || '[]'));
+  } catch {
+    return [];
+  }
+}
+
+function normalizeExcludedSymbols(entries) {
+  if (!Array.isArray(entries)) return [];
+  const bySymbol = new Map();
+  for (const entry of entries) {
+    const normalized = normalizeExcludedSymbol(entry);
+    if (normalized) bySymbol.set(normalized.symbol, normalized);
+  }
+  return [...bySymbol.values()].sort((a, b) => a.symbol.localeCompare(b.symbol));
+}
+
+function normalizeExcludedSymbol(entry) {
+  const symbol = normalizeSymbol(typeof entry === 'string' ? entry : entry?.symbol);
+  if (!symbol) return null;
+  const now = new Date().toISOString();
+  return {
+    symbol,
+    companyName: cleanText(entry?.companyName || entry?.company_name || ''),
+    reason: cleanText(entry?.reason || 'Not tradable via Alpaca asset lookup.'),
+    source: cleanText(entry?.source || 'alpaca-asset-eligibility'),
+    addedAt: cleanText(entry?.addedAt || entry?.added_at || now),
+    assetStatus: cleanText(entry?.assetStatus || entry?.status || ''),
+    exchange: cleanText(entry?.exchange || ''),
+  };
+}
+
+function normalizeSymbol(symbol) {
+  return String(symbol || '').trim().toUpperCase().replace(/[^A-Z0-9.-]/g, '').slice(0, 16);
+}
+
+function cleanText(value) {
+  return String(value || '').trim().slice(0, 500);
+}

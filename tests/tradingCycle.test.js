@@ -33,6 +33,7 @@ const brokerAccountRepo = require('../src/db/repositories/brokerAccountRepo');
 const researchRepo = require('../src/db/repositories/researchRepo');
 const decisionReportRepo = require('../src/db/repositories/decisionReportRepo');
 const MockBrokerClient = require('../src/services/broker/MockBrokerClient');
+const rulesEngine = require('../src/services/rulesEngine');
 const { runTradingCycle } = require('../src/services/tradingCycle');
 
 // research_snapshot_id is a real FK on trading_plans, so the stub must
@@ -41,10 +42,20 @@ const stubRunResearchCycleFactory = (_watchlist, { userId } = {}) =>
   researchRepo.create({
     userId,
     source: 'stub',
-    summary: { watchlist: ['NVDA', 'AAPL'] },
+    summary: {
+      watchlist: ['NVDA', 'AAPL'],
+      sourceStack: [
+        { name: 'quote-feed', type: 'market-data' },
+        { name: 'news-research', type: 'news' },
+        { name: 'financial-context', type: 'financial' },
+      ],
+      reportNarrative: {
+        topCandidates: [{ symbol: 'NVDA', bias: 'buy bullish opportunity', reasons: ['strong cross-source agreement'] }],
+      },
+    },
     signals: [
-      { symbol: 'NVDA', price: 100, changePct: 3, volatilityPct: 2, momentum: 'bullish' },
-      { symbol: 'AAPL', price: 50, changePct: -0.2, volatilityPct: 1, momentum: 'neutral' },
+      { symbol: 'NVDA', price: 100, changePct: 3, volatilityPct: 2, momentum: 'bullish', localAiScore: 72, financialEventScore: 60 },
+      { symbol: 'AAPL', price: 50, changePct: -0.2, volatilityPct: 1, momentum: 'neutral', localAiScore: 50, financialEventScore: 50 },
     ],
   });
 
@@ -202,9 +213,19 @@ describe('runTradingCycle (mocked research + AI + broker)', () => {
       researchRepo.create({
         userId,
         source: 'stub',
-        summary: { watchlist: ['F'] },
+        summary: {
+          watchlist: ['F'],
+          sourceStack: [
+            { name: 'quote-feed', type: 'market-data' },
+            { name: 'news-research', type: 'news' },
+            { name: 'financial-context', type: 'financial' },
+          ],
+          reportNarrative: {
+            topCandidates: [{ symbol: 'F', bias: 'buy bullish opportunity', reasons: ['simulation cash regression'] }],
+          },
+        },
         signals: [
-          { symbol: 'F', price: 14, changePct: 1.4, volatilityPct: 1.2, momentum: 'bullish' },
+          { symbol: 'F', price: 14, changePct: 1.4, volatilityPct: 1.2, momentum: 'bullish', localAiScore: 72, financialEventScore: 60 },
         ],
       });
     const fordPlan = async () => ({
@@ -266,6 +287,33 @@ describe('runTradingCycle (mocked research + AI + broker)', () => {
     const settings = settingsRepo.get(brokerUser.id);
     expect(settings.broker_connection_kill_switch_engaged).toBe(1);
     expect(settings.broker_connection_kill_switch_reason).toContain('connection refused');
+  });
+
+  it('computes equityUsd from cash + position cost basis and threads it into checkTradeAllowed', async () => {
+    const equityUser = userRepo.createUser({
+      email: `cycle-equity-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+    settingsRepo.update(equityUser.id, { tradingEnabled: 1, dayTradingEnabled: 1 });
+
+    const checkSpy = vi.spyOn(rulesEngine, 'checkTradeAllowed');
+    const broker = new MockBrokerClient({ startingCashUsd: 250 });
+    await runTradingCycle({
+      userId: equityUser.id,
+      broker,
+      runResearchCycle: stubRunResearchCycleFactory,
+      generatePlan: stubGeneratePlan,
+      executionMode: 'live',
+    });
+
+    expect(checkSpy).toHaveBeenCalled();
+    const call = checkSpy.mock.calls.find((args) => args[0].symbol === 'NVDA');
+    // MockBrokerClient reports equityUsd: null, so tradingCycle falls back to
+    // cash + position cost basis; no positions yet, so equity == starting cash.
+    expect(call[0].equityUsd).toBe(250);
+    checkSpy.mockRestore();
   });
 
   it('trips automatic_strategy_kill_switch when an unattended auto-mode cycle throws', async () => {

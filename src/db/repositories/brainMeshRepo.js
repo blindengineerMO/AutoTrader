@@ -55,6 +55,23 @@ const listConversationsStmt = db.prepare(`
   LIMIT ?
 `);
 
+const listCompletedConversationsStmt = db.prepare(`
+  SELECT * FROM brain_mesh_conversations
+  WHERE (user_id IS ? OR user_id IS NULL)
+    AND status = 'complete'
+  ORDER BY updated_at DESC
+  LIMIT ?
+`);
+
+const completeConversationStmt = db.prepare(`
+  UPDATE brain_mesh_conversations
+  SET status = 'complete',
+    updated_at = datetime('now'),
+    metadata_json = @metadataJson
+  WHERE id = @id
+    AND (user_id IS @userId OR user_id IS NULL)
+`);
+
 const insertMessageStmt = db.prepare(`
   INSERT INTO brain_mesh_messages (
     id, user_id, conversation_id, trace_id, causation_id, sender, recipient,
@@ -128,6 +145,19 @@ function upsertConversation(conversation) {
 
 function listConversations(userId, limit = 50) {
   return listConversationsStmt.all(userId || null, limit).map(deserializeConversation);
+}
+
+function listCompletedConversations(userId, limit = 50) {
+  return listCompletedConversationsStmt.all(userId || null, limit).map(deserializeConversation);
+}
+
+function completeConversation({ id, userId = null, metadata = {} }) {
+  completeConversationStmt.run({
+    id,
+    userId: userId || null,
+    metadataJson: JSON.stringify(metadata || {}),
+  });
+  return true;
 }
 
 function recordMessage(envelope, status = 'accepted') {
@@ -222,6 +252,8 @@ module.exports = {
   listAgents,
   upsertConversation,
   listConversations,
+  listCompletedConversations,
+  completeConversation,
   recordMessage,
   listMessages,
   linkAgentToBoard,

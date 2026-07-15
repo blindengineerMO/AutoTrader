@@ -12,6 +12,8 @@ const { buildDecisionReport } = require('./decisionReportService');
 const settingsRepo = require('../db/repositories/settingsRepo');
 const alertingService = require('./alertingService');
 const simulationAccountReconciliation = require('./simulationAccountReconciliationService');
+const alpacaRules = require('./alpacaRulesService');
+const crossSourceAgreement = require('./crossSourceAgreementService');
 const logger = require('../utils/logger');
 
 /**
@@ -98,14 +100,20 @@ async function runTradingCycleInner({
     accountState.buyingPowerUsd,
     mode === 'live' ? 'connected' : 'simulation'
   );
+  const currentPositions = positionRepo.listByUser(userId);
+  const positionsValueUsd = currentPositions.reduce((sum, position) => sum + position.quantity * position.avg_cost_usd, 0);
+  const equityUsd = accountState.equityUsd ?? accountState.cashUsd + positionsValueUsd;
 
   const recentTradeCounts = {};
-  for (const signal of researchSnapshot.signals) {
-    recentTradeCounts[signal.symbol] = orderRepo.countRecentForSymbol(userId, signal.symbol);
+  for (const symbol of new Set([
+    ...researchSnapshot.signals.map((signal) => signal.symbol),
+    ...currentPositions.map((position) => position.symbol),
+  ])) {
+    recentTradeCounts[symbol] = orderRepo.countRecentForSymbol(userId, symbol);
   }
 
   emit(onEvent, 'strategy', 84, 'debug', 'Generating final buy/sell/hold strategy.');
-  const { modelUsed, raw } = await generatePlan({ userId, researchSnapshot, accountState, recentTradeCounts, onEvent });
+  const { modelUsed, raw } = await generatePlan({ userId, researchSnapshot, accountState, recentTradeCounts, positions: currentPositions, onEvent });
 
   let resolvedModelUsed = modelUsed;
   let resolvedRaw = raw;
@@ -149,12 +157,23 @@ async function runTradingCycleInner({
       modeReason: resolvedReason,
       accountState,
       brokerAccount,
+      positions: currentPositions,
     });
     emit(onEvent, 'report', 100, 'error', 'Trading plan rejected; decision report generated with schema failure.', {
       planId: rejected.id,
     });
     return rejected;
   }
+
+  const agreementActions = crossSourceAgreement.enforcePlanAgreement({
+    actions: parsed.data.actions,
+    researchSnapshot,
+    positions: currentPositions,
+  });
+  parsed = tradingPlanSchema.safeParse({
+    ...parsed.data,
+    actions: agreementActions,
+  });
 
   const plan = tradingPlanRepo.create({
     userId,
@@ -186,7 +205,7 @@ async function runTradingCycleInner({
       }
       continue;
     }
-    await executeAction({ userId, brokerAccount, broker, action, researchSnapshot });
+    await executeAction({ userId, brokerAccount, broker, action, researchSnapshot, equityUsd });
   }
 
   const finalPlan = tradingPlanRepo.getById(plan.id);
@@ -199,6 +218,7 @@ async function runTradingCycleInner({
     modeReason: resolvedReason,
     accountState,
     brokerAccount,
+    positions: currentPositions,
   });
   emit(onEvent, 'report', 98, 'info', 'Decision report generated.', {
     reportId: report.id,
@@ -221,7 +241,7 @@ function buildSimulationReason({ settings, broker }) {
   return 'Simulation mode was requested explicitly.';
 }
 
-async function executeAction({ userId, brokerAccount, broker, action, researchSnapshot }) {
+async function executeAction({ userId, brokerAccount, broker, action, researchSnapshot, equityUsd }) {
   const signal = researchSnapshot.signals.find((s) => s.symbol === action.symbol);
   const estimatedUsd = (action.quantity || 1) * (signal?.price || 0);
 
@@ -230,6 +250,9 @@ async function executeAction({ userId, brokerAccount, broker, action, researchSn
     symbol: action.symbol,
     side: action.action,
     estimatedUsd,
+    quantity: action.quantity || 0,
+    asset: signal?.alpacaAsset || signal?.evidence?.alpacaAsset || null,
+    equityUsd,
   });
 
   if (!check.allowed) {
@@ -326,6 +349,18 @@ function recordPersistentSimulatedFill({ userId, brokerAccount, action, research
   const quantity = Number(action.quantity || 0);
   const notional = fillPrice * quantity;
   if (!fillPrice || !quantity || notional <= 0) return { status: 'simulated_rejected: invalid quantity or price' };
+
+  const orderEvaluation = alpacaRules.evaluateOrder({
+    userId,
+    symbol: action.symbol,
+    side: action.action,
+    quantity,
+    price: fillPrice,
+    asset: signal?.alpacaAsset || signal?.evidence?.alpacaAsset || { fractionable: true, tradable: true },
+  });
+  if (!orderEvaluation.allowed) {
+    return { status: `simulated_rejected: ${orderEvaluation.failed.join(', ')}` };
+  }
 
   const latestAccount = brokerAccountRepo.getDefault(userId) || brokerAccount;
   const currentCash = Number(latestAccount.cash_balance_usd || 0);

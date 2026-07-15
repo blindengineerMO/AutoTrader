@@ -123,4 +123,131 @@ describe('rulesEngine.checkTradeAllowed', () => {
     expect(result.allowed).toBe(false);
     expect(result.reason).toMatch(/never permitted/);
   });
+
+  it('blocks buy orders above the configured max buy per order', () => {
+    const freshUser = userRepo.createUser({
+      email: `rules-max-buy-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+    settingsRepo.update(freshUser.id, { tradingEnabled: 1, maxBuyOrderNotionalUsd: 25 });
+
+    const result = rulesEngine.checkTradeAllowed({
+      userId: freshUser.id,
+      symbol: 'AAPL',
+      side: 'buy',
+      estimatedUsd: 30,
+      quantity: 0.3,
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toMatch(/exceeds max buy per order/);
+  });
+
+  it('blocks fractional orders when disabled in settings', () => {
+    const freshUser = userRepo.createUser({
+      email: `rules-fractional-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+    settingsRepo.update(freshUser.id, {
+      tradingEnabled: 1,
+      fractionalTradingEnabled: 0,
+      maxBuyOrderNotionalUsd: 100,
+    });
+
+    const result = rulesEngine.checkTradeAllowed({
+      userId: freshUser.id,
+      symbol: 'AAPL',
+      side: 'buy',
+      estimatedUsd: 10,
+      quantity: 0.5,
+      asset: { fractionable: true },
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toMatch(/fractional-trading-disabled/);
+  });
+
+  it('keeps the flat 24h cap behavior when day trading is disabled (regression)', () => {
+    const freshUser = userRepo.createUser({
+      email: `rules-day-trading-off-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+    settingsRepo.update(freshUser.id, { tradingEnabled: 1 });
+    const freshBrokerAccountId = brokerAccountRepo.ensureDefault(freshUser.id).id;
+    for (let i = 0; i < 3; i++) {
+      orderRepo.create({
+        userId: freshUser.id,
+        brokerAccountId: freshBrokerAccountId,
+        planActionId: null,
+        symbol: 'NVDA',
+        side: 'buy',
+        quantity: 1,
+        orderType: 'market',
+        status: 'filled',
+        brokerOrderId: `test-off-${i}`,
+      });
+    }
+    const result = rulesEngine.checkTradeAllowed({ userId: freshUser.id, symbol: 'NVDA', side: 'buy', estimatedUsd: 10, equityUsd: 1000 });
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toMatch(/already has 3 trades/);
+  });
+
+  it('applies the pattern-day-trader rule instead of the flat cap when day trading is enabled', () => {
+    const freshUser = userRepo.createUser({
+      email: `rules-day-trading-on-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+    settingsRepo.update(freshUser.id, { tradingEnabled: 1, dayTradingEnabled: 1 });
+    const freshBrokerAccountId = brokerAccountRepo.ensureDefault(freshUser.id).id;
+    // 4 same-symbol trades in 24h would trip the old flat cap, but with day
+    // trading enabled the flat cap no longer applies at all (buys alone are
+    // never day trades), so this must be allowed.
+    for (let i = 0; i < 4; i++) {
+      orderRepo.create({
+        userId: freshUser.id,
+        brokerAccountId: freshBrokerAccountId,
+        planActionId: null,
+        symbol: 'NVDA',
+        side: 'buy',
+        quantity: 1,
+        orderType: 'market',
+        status: 'filled',
+        brokerOrderId: `test-on-${i}`,
+      });
+    }
+    const result = rulesEngine.checkTradeAllowed({ userId: freshUser.id, symbol: 'NVDA', side: 'buy', estimatedUsd: 10, equityUsd: 1000 });
+    expect(result.allowed).toBe(true);
+  });
+
+  it('allows unlimited day trades once equity is at or above $25,000, even with day trading enabled', () => {
+    const freshUser = userRepo.createUser({
+      email: `rules-day-trading-big-equity-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+    settingsRepo.update(freshUser.id, { tradingEnabled: 1, dayTradingEnabled: 1 });
+    const result = rulesEngine.checkTradeAllowed({ userId: freshUser.id, symbol: 'NVDA', side: 'sell', estimatedUsd: 10, equityUsd: 30000 });
+    expect(result.allowed).toBe(true);
+  });
+
+  it('round-trips day_trading_enabled through settingsRepo.update/get', () => {
+    const freshUser = userRepo.createUser({
+      email: `settings-day-trading-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+    expect(settingsRepo.get(freshUser.id).day_trading_enabled).toBe(0);
+    settingsRepo.update(freshUser.id, { dayTradingEnabled: 1 });
+    expect(settingsRepo.get(freshUser.id).day_trading_enabled).toBe(1);
+  });
 });

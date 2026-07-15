@@ -61,4 +61,30 @@ describe('financialEventWeightingService', () => {
 
     expect(result.aggregateScore).toBeGreaterThanOrEqual(0);
   });
+
+  it('applies learned per-category multipliers to event scores', () => {
+    const input = {
+      candidate: { symbol: 'NVDA', companyName: 'NVIDIA' },
+      news: {
+        items: [{
+          title: 'NVIDIA raised guidance above consensus',
+          description: 'NVDA reported a revenue beat and margin expansion after demand exceeded expectations.',
+          link: 'https://www.sec.gov/Archives/example',
+        }],
+      },
+      learned: { observations: [] },
+    };
+
+    const baseline = financialWeights.scoreCandidateEvidence(input);
+    const guidanceEvent = baseline.topEvents.find((event) => event.event.type.includes('raised_guidance'));
+    const halved = financialWeights.scoreCandidateEvidence({
+      ...input,
+      learnedCategoryMultipliers: { [guidanceEvent.event.category]: 0.5 },
+    });
+    const halvedEvent = halved.topEvents.find((event) => event.event.type.includes('raised_guidance'));
+
+    expect(halvedEvent.adjustments.learned_category_multiplier).toBe(0.5);
+    expect(Math.abs(halvedEvent.final_event_score)).toBeLessThan(Math.abs(guidanceEvent.final_event_score));
+    expect(guidanceEvent.adjustments.learned_category_multiplier).toBe(1);
+  });
 });

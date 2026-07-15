@@ -10,6 +10,7 @@ const watcherAgentService = require('./watcherAgentService');
 const agentWorkspace = require('./agentWorkspaceService');
 const agentResearch = require('./agentResearchService');
 const agentDecisionTree = require('./agentDecisionTreeService');
+const agentAffinityRepo = require('../db/repositories/agentAffinityRepo');
 
 const MODERATOR_BRAIN_ID = 'agent.council.moderator';
 const OLLAMA_BRAIN_ID = 'brain.llm.ollama';
@@ -95,8 +96,8 @@ function ensureModeratorRegistered() {
     if (!userId) return { seeded: 0 };
     let seeded = 0;
     for (const symbol of watchSymbols) {
-      watcherAgentService.ensureWatcherAgent(userId, { symbol });
-      seeded += 1;
+      const watcher = watcherAgentService.ensureWatcherAgent(userId, { symbol });
+      if (watcher) seeded += 1;
     }
     return { seeded };
   });
@@ -355,6 +356,12 @@ async function runCouncil({ userId, snapshotId = null, onEvent = () => {} } = {}
     const resolution = result.replies.find((reply) => reply.kind === 'reply')?.body;
     if (resolution) {
       challengeOutcomes.set(`${resolution.targetAgentId}:${resolution.symbol}`, resolution.weightMultiplier);
+      agentAffinityRepo.recordChallengeOutcome({
+        slugA: debate.challengerSlug,
+        slugB: debate.targetSlug,
+        topic: debate.topic,
+        upheld: resolution.resolution === 'challenge-upheld',
+      });
     }
   }
 
@@ -387,6 +394,12 @@ async function runCouncil({ userId, snapshotId = null, onEvent = () => {} } = {}
     const agent = agents.find((item) => item.id === recommendation.agentId);
     if (agent) agentWorkspace.recordRecommendation(agent, recommendation, run);
   }
+  brainMesh.completeConversation(conversation.id, userId, {
+    completedBy: 'agent.council.moderator',
+    completedOp: 'agent.consensus.ready',
+    completedAt: new Date().toISOString(),
+    councilRunId: run.id,
+  });
 
   emit(onEvent, 'agent-council', 58, 'debug', 'Personality agent council completed consensus run.', {
     runId: run.id,
@@ -458,30 +471,47 @@ function buildGeneratedProfile(name) {
 }
 
 function recommendForAgent(agent, signals, context = {}) {
-  const candidates = signals.length ? signals : fallbackSignals(agent);
-  return candidates
+  const candidates = buildCouncilSignals(agent, signals, context);
+  const ownedSymbols = new Set((context.positions || []).map((position) => normalizeSymbol(position.symbol)));
+  const topOpportunities = candidates
     .map((signal) => scoreSignalForAgent(agent, signal, context))
     .sort((a, b) => b.conviction - a.conviction)
     .slice(0, 5)
-    .map((scored, index) => {
-      const action = pickAction(scored, index);
-      return {
-        agentId: agent.id,
-        symbol: scored.symbol,
-        action,
-        conviction: scored.conviction,
-        rationale: `${agent.name} bias ${action.toUpperCase()} on ${scored.symbol}: ${scored.reason}`,
-        evidence: {
-          agent: summarizeAgent(agent),
-          signal: scored.signal,
-          biasScore: scored.biasScore,
-          localAiScore: scored.signal.localAiScore,
-          challengePoints: scored.challengePoints,
-          decisionTree: scored.decisionTree,
-          decisionObject: scored.decisionTree.decision,
-        },
-      };
-    });
+    .map((scored, index) => buildRecommendation({ agent, scored, index, ownedSymbols, reviewType: scored.signal.ownedPosition ? 'owned-position' : 'opportunity' }));
+  const represented = new Set(topOpportunities.map((rec) => normalizeSymbol(rec.symbol)));
+  const ownedPositionReviews = candidates
+    .filter((signal) => signal.ownedPosition && !represented.has(normalizeSymbol(signal.symbol)))
+    .map((signal) => scoreSignalForAgent(agent, signal, context))
+    .sort((a, b) => b.conviction - a.conviction)
+    .map((scored, index) => buildRecommendation({ agent, scored, index, ownedSymbols, reviewType: 'owned-position' }));
+  return [...topOpportunities, ...ownedPositionReviews];
+}
+
+function buildRecommendation({ agent, scored, index, ownedSymbols, reviewType }) {
+  const isOwned = scored.signal.ownedPosition || ownedSymbols.has(normalizeSymbol(scored.symbol));
+  const action = pickAction(scored, index, { isOwned });
+  const positionAction = isOwned ? normalizeOwnedAction(action) : null;
+  return {
+    agentId: agent.id,
+    symbol: scored.symbol,
+    action,
+    positionAction,
+    reviewType,
+    conviction: scored.conviction,
+    rationale: `${agent.name} bias ${formatAction(action)} on ${scored.symbol}: ${scored.reason}${isOwned ? ` Current position review recommends ${positionAction}.` : ''}`,
+    evidence: {
+      agent: summarizeAgent(agent),
+      signal: scored.signal,
+      ownedPosition: scored.signal.ownedPosition || null,
+      positionAction,
+      reviewType,
+      biasScore: scored.biasScore,
+      localAiScore: scored.signal.localAiScore,
+      challengePoints: scored.challengePoints,
+      decisionTree: scored.decisionTree,
+      decisionObject: scored.decisionTree.decision,
+    },
+  };
 }
 
 function scoreSignalForAgent(agent, signal, context = {}) {
@@ -525,6 +555,27 @@ function scoreSignalForAgent(agent, signal, context = {}) {
   };
 }
 
+// Prefers a challenger the target has a strong (or unproven) affinity with on
+// this topic; a pairing proven low-value after enough samples is skipped so
+// the council learns it doesn't need to keep consulting that agent here —
+// but never down to zero candidates, so a cold pairing always gets a chance
+// and a bad run can't permanently silence an agent.
+function selectSkeptic(agents, topAgent, topic) {
+  const candidates = agents.filter((agent) => agent.id !== topAgent?.id);
+  if (!candidates.length) return null;
+  const scored = candidates.map((agent) => ({
+    agent,
+    ...agentAffinityRepo.getAffinity(topAgent?.slug, agent.slug, topic),
+  }));
+  const viable = scored.filter((entry) => !(entry.confident && entry.affinityScore <= -0.5));
+  const pool = viable.length ? viable : scored;
+  pool.sort((a, b) => {
+    if (b.affinityScore !== a.affinityScore) return b.affinityScore - a.affinityScore;
+    return (hasRiskPenalty(b.agent) ? 1 : 0) - (hasRiskPenalty(a.agent) ? 1 : 0);
+  });
+  return pool[0].agent;
+}
+
 function buildDebateRounds(agents, recommendations) {
   const bySymbol = new Map();
   for (const rec of recommendations) {
@@ -536,18 +587,23 @@ function buildDebateRounds(agents, recommendations) {
   for (const [symbol, recs] of bySymbol.entries()) {
     const actions = new Set(recs.map((rec) => rec.action));
     const top = [...recs].sort((a, b) => b.conviction - a.conviction)[0];
-    const skeptic = agents.find((agent) => agent.id !== top.agentId && hasRiskPenalty(agent)) || agents.find((agent) => agent.id !== top.agentId);
+    const topAgent = agents.find((agent) => agent.id === top.agentId);
+    const topic = String(top.evidence?.signal?.theme || 'general').toLowerCase();
+    const skeptic = selectSkeptic(agents, topAgent, topic);
     if (!skeptic) continue;
     if (actions.size > 1 || top.conviction < 68 || top.evidence.challengePoints?.length) {
       const challengerRec = recs.find((rec) => rec.agentId === skeptic.id);
       debates.push({
         symbol,
+        topic,
         targetAction: top.action,
         targetAgentId: top.agentId,
-        targetBrainId: agents.find((agent) => agent.id === top.agentId)?.brain_id,
+        targetBrainId: topAgent?.brain_id,
+        targetSlug: topAgent?.slug,
         targetConviction: top.conviction,
         challengerAgentId: skeptic.id,
         challengerBrainId: skeptic.brain_id,
+        challengerSlug: skeptic.slug,
         challengerConviction: challengerRec ? challengerRec.conviction : null,
         challenge: `${skeptic.name} challenges ${symbol}: ${top.evidence.challengePoints?.[0] || top.evidence.decisionTree?.warnings?.[0] || 'council requires stronger cross-agent evidence before consensus.'}`,
         alternative: top.action === 'buy' ? 'watch' : 'hold',
@@ -562,42 +618,61 @@ function buildConsensus(recommendations, agents, challengeOutcomes = new Map()) 
   const grouped = new Map();
   for (const rec of recommendations) {
     const item = grouped.get(rec.symbol) || { symbol: rec.symbol, votes: [], score: 0 };
-    const actionWeight = rec.action === 'buy' ? 1 : rec.action === 'watch' ? 0.4 : rec.action === 'sell' ? -1 : 0;
+    const actionWeight = rec.action === 'buy' || rec.action === 'buy_more' ? 1 : rec.action === 'watch' ? 0.4 : rec.action === 'sell' ? -1 : 0;
     const learningWeight = Number(agentById.get(rec.agentId)?.model?.learningWeight ?? 1);
     const challengeMultiplier = challengeOutcomes.get(`${rec.agentId}:${rec.symbol}`) ?? 1;
     item.score += actionWeight * rec.conviction * learningWeight * challengeMultiplier;
+    if (rec.evidence?.ownedPosition) item.ownedPosition = rec.evidence.ownedPosition;
     item.votes.push({
       agentId: rec.agentId,
       agentName: agents.find((agent) => agent.id === rec.agentId)?.name,
       action: rec.action,
+      positionAction: rec.positionAction,
+      reviewType: rec.reviewType,
       conviction: rec.conviction,
       rationale: rec.rationale,
+      ownedPosition: rec.evidence?.ownedPosition || null,
     });
     grouped.set(rec.symbol, item);
   }
-  const finalRecommendations = [...grouped.values()]
+  const recommendationRows = [...grouped.values()]
     .map((item) => {
-      const buyVotes = item.votes.filter((vote) => vote.action === 'buy');
+      const buyVotes = item.votes.filter((vote) => vote.action === 'buy' || vote.action === 'buy_more');
       const sellVotes = item.votes.filter((vote) => vote.action === 'sell');
       const avgConviction = Math.round(item.votes.reduce((sum, vote) => sum + vote.conviction, 0) / item.votes.length);
-      const action = item.score > 90 && buyVotes.length >= 2 ? 'buy' : item.score < -45 || sellVotes.length >= 2 ? 'sell' : 'watch';
+      const ownedPosition = item.ownedPosition || null;
+      const action = item.score > 90 && buyVotes.length >= 2
+        ? ownedPosition ? 'buy_more' : 'buy'
+        : item.score < -45 || sellVotes.length >= 2
+          ? 'sell'
+          : ownedPosition
+            ? 'hold'
+            : 'watch';
       return {
         symbol: item.symbol,
         action,
+        reviewType: ownedPosition ? 'owned-position' : 'opportunity',
+        ownedPosition,
+        positionAction: ownedPosition ? normalizeOwnedAction(action) : null,
         consensusScore: Math.round(item.score),
         avgConviction,
-        supportingAgents: item.votes.filter((vote) => vote.action === action || (action === 'watch' && vote.action !== 'sell')).map((vote) => vote.agentName),
+        supportingAgents: item.votes.filter((vote) => vote.action === action || (action === 'buy_more' && vote.action === 'buy') || (action === 'hold' && vote.action !== 'sell') || (action === 'watch' && vote.action !== 'sell')).map((vote) => vote.agentName),
         decisionFrameworkVersion: agentDecisionTree.VERSION,
         votes: item.votes,
       };
     })
-    .sort((a, b) => b.consensusScore - a.consensusScore)
-    .slice(0, 10);
+    .sort((a, b) => b.consensusScore - a.consensusScore);
+  const ownedPositionReviews = recommendationRows.filter((item) => item.reviewType === 'owned-position');
+  const opportunityRecommendations = recommendationRows.filter((item) => item.reviewType !== 'owned-position').slice(0, 10);
+  const finalRecommendations = [...opportunityRecommendations, ...ownedPositionReviews]
+    .filter((item, index, rows) => rows.findIndex((candidate) => candidate.symbol === item.symbol) === index)
+    .slice(0, Math.max(10, opportunityRecommendations.length + ownedPositionReviews.length));
   return {
     generatedAt: new Date().toISOString(),
     agentCount: agents.length,
     recommendationCount: recommendations.length,
     finalRecommendations,
+    ownedPositionReviews,
     operatingMode: 'simulation-council',
     decisionFrameworkVersion: agentDecisionTree.VERSION,
     decisionFramework: agentDecisionTree.buildDecisionFramework({}),
@@ -771,12 +846,64 @@ function fallbackSignals(agent) {
   }));
 }
 
+function buildCouncilSignals(agent, signals, context = {}) {
+  const base = signals.length ? signals : fallbackSignals(agent);
+  const bySymbol = new Map(base.map((signal) => [normalizeSymbol(signal.symbol), { ...signal }]));
+  for (const position of context.positions || []) {
+    const symbol = normalizeSymbol(position.symbol);
+    if (!symbol || Number(position.quantity || 0) <= 0) continue;
+    const existing = bySymbol.get(symbol);
+    bySymbol.set(symbol, buildOwnedPositionSignal(existing, position));
+  }
+  return [...bySymbol.values()];
+}
+
+function buildOwnedPositionSignal(signal, position) {
+  const avgCost = Number(position.avg_cost_usd || 0);
+  const quantity = Number(position.quantity || 0);
+  const price = Number(signal?.price || signal?.evidence?.quote?.current || avgCost || 0);
+  const unrealizedPct = avgCost > 0 && price > 0 ? ((price - avgCost) / avgCost) * 100 : 0;
+  return {
+    ...(signal || {}),
+    symbol: normalizeSymbol(position.symbol),
+    price,
+    changePct: Number(signal?.changePct ?? unrealizedPct.toFixed(2)),
+    volatilityPct: Number(signal?.volatilityPct ?? 1),
+    momentum: signal?.momentum || (unrealizedPct > 2 ? 'bullish' : unrealizedPct < -2 ? 'bearish' : 'neutral'),
+    localAiScore: Number(signal?.localAiScore ?? (unrealizedPct > 8 ? 70 : unrealizedPct < -8 ? 34 : 55)),
+    theme: signal?.theme || 'current-owned-position',
+    actionBias: signal?.actionBias || (unrealizedPct < -8 ? 'sell-or-avoid' : unrealizedPct > 8 ? 'buy-candidate' : 'hold-watch'),
+    ownedPosition: {
+      id: position.id,
+      brokerAccountId: position.broker_account_id,
+      quantity,
+      avgCostUsd: avgCost,
+      currentPriceUsd: price,
+      costBasisUsd: Number((quantity * avgCost).toFixed(2)),
+      marketValueUsd: Number((quantity * price).toFixed(2)),
+      unrealizedPnlUsd: Number(((price - avgCost) * quantity).toFixed(2)),
+      unrealizedPnlPct: Number(unrealizedPct.toFixed(2)),
+      updatedAt: position.updated_at,
+    },
+    evidence: {
+      ...(signal?.evidence || {}),
+      explanation: [
+        ...(signal?.evidence?.explanation || []),
+        `Owned position review: ${quantity} shares at average cost $${avgCost.toFixed(2)}; current evidence price $${price.toFixed(2)}; unrealized ${unrealizedPct.toFixed(2)}%.`,
+      ],
+    },
+  };
+}
+
 function stripRecommendationForFrame(rec) {
   return {
     symbol: rec.symbol,
     action: rec.action,
+    positionAction: rec.positionAction,
+    reviewType: rec.reviewType,
     conviction: rec.conviction,
     rationale: rec.rationale,
+    ownedPosition: rec.evidence?.ownedPosition || null,
     challengePoints: rec.evidence?.challengePoints || [],
   };
 }
@@ -796,14 +923,28 @@ function hasRiskPenalty(agent) {
   return (agent.bias?.factors?.riskPenalty || agent.bias?.factors?.volatilityPenalty || 0) > 0;
 }
 
-function pickAction(scored, index) {
-  if (scored.recommendedAction === 'buy') return index <= 4 ? 'buy' : 'watch';
+function pickAction(scored, index, { isOwned = false } = {}) {
+  if (scored.recommendedAction === 'buy') return isOwned ? 'buy_more' : index <= 4 ? 'buy' : 'watch';
   if (scored.recommendedAction === 'sell') return 'sell';
-  if (scored.recommendedAction === 'watch') return 'watch';
-  if (scored.conviction >= 72 && index <= 2) return 'buy';
+  if (scored.recommendedAction === 'watch') return isOwned ? 'hold' : 'watch';
+  if (scored.conviction >= 72 && index <= 2) return isOwned ? 'buy_more' : 'buy';
   if (scored.conviction <= 28) return 'sell';
-  if (scored.conviction >= 55) return 'watch';
+  if (scored.conviction >= 55) return isOwned ? 'hold' : 'watch';
   return 'hold';
+}
+
+function normalizeOwnedAction(action) {
+  if (action === 'buy' || action === 'buy_more') return 'buy_more';
+  if (action === 'sell') return 'sell';
+  return 'hold';
+}
+
+function formatAction(action) {
+  return String(action || '').replace(/_/g, ' ').toUpperCase();
+}
+
+function normalizeSymbol(symbol) {
+  return String(symbol || '').trim().toUpperCase();
 }
 
 function symbolMatchesSector(symbol, sector) {
@@ -867,6 +1008,7 @@ module.exports = {
   exportAgent,
   importAgent,
   runCouncil,
+  buildDebateRounds,
   listCouncilRuns,
   buildConsensus,
 };

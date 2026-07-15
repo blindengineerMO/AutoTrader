@@ -1,55 +1,60 @@
 <template>
   <div class="notification-bell">
-    <button class="bell-trigger" type="button" @click="toggleOpen" aria-label="Notifications">
+    <button ref="triggerRef" class="bell-trigger" type="button" @click="toggleOpen" aria-label="Notifications">
       <v-icon icon="mdi-bell-outline" size="19" />
       <span v-if="unseenCount > 0" class="bell-badge">{{ unseenCount > 9 ? '9+' : unseenCount }}</span>
     </button>
-    <div v-if="open" class="bell-dropdown glass-panel p-4" @click.self.stop>
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-headline text-xs uppercase text-white/60">Notifications</h3>
-        <button class="text-[10px] uppercase text-white/40 hover:text-white/70" type="button" @click="markAllSeen">
-          Mark all read
-        </button>
-      </div>
-      <div v-if="loading" class="text-xs text-white/40 py-4 text-center">Loading...</div>
-      <div v-else-if="!filteredItems.length" class="text-xs text-white/40 py-4 text-center">No recent activity.</div>
-      <ul v-else class="bell-list">
-        <li v-for="item in filteredItems" :key="item.id" class="bell-item" :class="{ unseen: !seenIds.has(item.id) }">
-          <v-icon :icon="item.icon" size="16" />
-          <div class="min-w-0 flex-1">
-            <div class="text-xs text-white/80 truncate">{{ item.message }}</div>
-            <div class="text-[10px] text-white/35">{{ relativeTime(item.at) }}</div>
-          </div>
-        </li>
-      </ul>
+    <Teleport to="body">
+      <div v-if="open" class="bell-dropdown floating-notification-panel glass-panel p-4" :style="dropdownStyle" @click.stop>
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="font-headline text-xs uppercase text-white/60">Notifications</h3>
+          <button class="text-[10px] uppercase text-white/40 hover:text-white/70" type="button" @click="markAllSeen">
+            Mark all read
+          </button>
+        </div>
+        <div v-if="loading" class="text-xs text-white/40 py-4 text-center">Loading...</div>
+        <div v-else-if="!filteredItems.length" class="text-xs text-white/40 py-4 text-center">No recent activity.</div>
+        <ul v-else class="bell-list">
+          <li v-for="item in filteredItems" :key="item.id" class="bell-item" :class="{ unseen: !seenIds.has(item.id) }">
+            <v-icon :icon="item.icon" size="16" />
+            <div class="min-w-0 flex-1">
+              <div class="text-xs text-white/80 truncate">{{ item.message }}</div>
+              <div class="text-[10px] text-white/35">{{ relativeTime(item.at) }}</div>
+            </div>
+          </li>
+        </ul>
 
-      <div class="bell-prefs">
-        <button class="bell-prefs-toggle" type="button" @click="prefsOpen = !prefsOpen">
-          <v-icon :icon="prefsOpen ? 'mdi-chevron-up' : 'mdi-tune-variant'" size="14" />
-          Notification preferences
-        </button>
-        <div v-if="prefsOpen" class="bell-prefs-list">
-          <label v-for="cat in categories" :key="cat.key" class="bell-pref-row">
-            <input type="checkbox" v-model="prefs[cat.key]" @change="persistPrefs" />
-            <span>{{ cat.label }}</span>
-          </label>
+        <div class="bell-prefs">
+          <button class="bell-prefs-toggle" type="button" @click="prefsOpen = !prefsOpen">
+            <v-icon :icon="prefsOpen ? 'mdi-chevron-up' : 'mdi-tune-variant'" size="14" />
+            Notification preferences
+          </button>
+          <div v-if="prefsOpen" class="bell-prefs-list">
+            <label v-for="cat in categories" :key="cat.key" class="bell-pref-row">
+              <input type="checkbox" v-model="prefs[cat.key]" @change="persistPrefs" />
+              <span>{{ cat.label }}</span>
+            </label>
+          </div>
         </div>
       </div>
-    </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, defineEmits, defineExpose, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import api from '../api/client';
 import { useAuthStore } from '../stores/auth';
 
 const auth = useAuthStore();
+const emit = defineEmits(['open']);
 const open = ref(false);
 const prefsOpen = ref(false);
 const loading = ref(true);
 const items = ref([]);
 const seenIds = ref(new Set());
+const triggerRef = ref(null);
+const dropdownStyle = ref({});
 
 const categories = [
   { key: 'killSwitch', label: 'Kill switch alerts' },
@@ -92,6 +97,14 @@ function persistPrefs() {
 
 function toggleOpen() {
   open.value = !open.value;
+  if (open.value) {
+    emit('open');
+    nextTick(updateDropdownPosition);
+  }
+}
+
+function closePanel() {
+  open.value = false;
 }
 
 function markAllSeen() {
@@ -162,21 +175,54 @@ async function refresh() {
 
 let intervalId = null;
 
+function updateDropdownPosition() {
+  const rect = triggerRef.value?.getBoundingClientRect();
+  if (!rect) return;
+  const viewportPad = 14;
+  const width = Math.min(340, window.innerWidth - viewportPad * 2);
+  const left = Math.min(Math.max(rect.left, viewportPad), window.innerWidth - width - viewportPad);
+  const spaceAbove = Math.max(0, rect.top - viewportPad - 10);
+  const spaceBelow = Math.max(0, window.innerHeight - rect.bottom - viewportPad - 10);
+  const opensAbove = spaceAbove >= 220 || spaceAbove >= spaceBelow;
+  const maxHeight = Math.max(180, Math.min(520, opensAbove ? spaceAbove : spaceBelow));
+  const top = opensAbove
+    ? Math.max(viewportPad, rect.top - maxHeight - 10)
+    : Math.min(window.innerHeight - viewportPad - 180, rect.bottom + 10);
+  dropdownStyle.value = {
+    left: `${left}px`,
+    top: `${top}px`,
+    width: `${width}px`,
+    maxHeight: `${maxHeight}px`,
+  };
+}
+
+function handleViewportChange() {
+  if (open.value) updateDropdownPosition();
+}
+
 onMounted(() => {
   loadSeen();
   loadPrefs();
   refresh();
   intervalId = setInterval(refresh, 60000);
   document.addEventListener('click', handleOutsideClick);
+  window.addEventListener('resize', handleViewportChange);
+  window.addEventListener('scroll', handleViewportChange, true);
+  window.addEventListener('autotrader:close-notifications', closePanel);
 });
 
 function handleOutsideClick(event) {
   if (!open.value) return;
-  if (!event.target.closest('.notification-bell')) open.value = false;
+  if (!event.target.closest('.notification-bell') && !event.target.closest('.bell-dropdown')) open.value = false;
 }
 
 onBeforeUnmount(() => {
   if (intervalId) clearInterval(intervalId);
   document.removeEventListener('click', handleOutsideClick);
+  window.removeEventListener('resize', handleViewportChange);
+  window.removeEventListener('scroll', handleViewportChange, true);
+  window.removeEventListener('autotrader:close-notifications', closePanel);
 });
+
+defineExpose({ close: closePanel });
 </script>

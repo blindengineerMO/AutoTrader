@@ -1,6 +1,7 @@
 const { CheerioCrawler, LogLevel, log } = require('@crawlee/cheerio');
 const financialWeights = require('./financialEventWeightingService');
 const textVector = require('../utils/textVector');
+const { config } = require('../config');
 
 log.setLevel(LogLevel.ERROR);
 
@@ -11,6 +12,141 @@ const DEFAULT_SEARCH_QUERIES = [
 ];
 
 const DUCKDUCKGO_PREFLIGHT_TIMEOUT_MS = 3500;
+// Providers the crawler rotates through for the initial fan-out of each query.
+// Overridable via config.search.providers; the direct-frontier set intentionally
+// excludes slow/hostile providers (duckduckgo-html is reached via fallback and
+// preflight only, since scraping it directly is challenge-prone).
+const DIRECT_FRONTIER_PROVIDERS = ['google', 'google-news', 'bing', 'mojeek', 'dogpile'];
+const DEFAULT_SEARCH_PROVIDERS = ['google', 'google-news'];
+const SEARCH_PROVIDER_FALLBACKS = {
+  google: ['bing', 'mojeek', 'dogpile', 'duckduckgo-html', 'google-news'],
+  'google-news': ['bing', 'mojeek', 'dogpile', 'duckduckgo-html'],
+  bing: ['mojeek', 'dogpile', 'duckduckgo-html', 'google-news'],
+  mojeek: ['dogpile', 'bing', 'duckduckgo-html', 'google-news'],
+  dogpile: ['mojeek', 'bing', 'duckduckgo-html', 'google-news'],
+  'duckduckgo-html': ['mojeek', 'dogpile', 'bing', 'google-news'],
+};
+const PROVIDER_HEALTH_DECAY_HALF_LIFE_MS = 15 * 60 * 1000;
+const PROVIDER_RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
+const providerHealth = new Map();
+
+// Rotating index keeps exploration alive, while health scoring pushes recently
+// successful providers ahead of providers seeing failures or 429s.
+let roundRobinIndex = 0;
+function nextRoundRobinProviders(count) {
+  const providers = configuredDirectProviders();
+  const start = roundRobinIndex % providers.length;
+  roundRobinIndex += 1;
+  const rotated = [...providers.slice(start), ...providers.slice(0, start)];
+  return sortProvidersByHealth(rotated).slice(0, Math.max(1, count));
+}
+function configuredDirectProviders() {
+  const configured = (config.search?.providers || []).filter((provider) => DIRECT_FRONTIER_PROVIDERS.includes(provider));
+  return configured.length ? configured : DIRECT_FRONTIER_PROVIDERS;
+}
+function resetSearchRoundRobin() {
+  roundRobinIndex = 0;
+  providerHealth.clear();
+}
+
+function sortProvidersByHealth(providers = []) {
+  return providers
+    .map((provider, index) => ({ provider, index, score: scoreSearchProviderHealth(provider) }))
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .map((entry) => entry.provider);
+}
+
+function recordSearchProviderResult(provider, outcome = 'failure', at = Date.now()) {
+  if (!provider) return null;
+  const health = decayedProviderHealth(provider, at);
+  if (outcome === 'success') {
+    health.successes += 1;
+    health.cooldownUntil = Math.max(0, health.cooldownUntil - PROVIDER_RATE_LIMIT_COOLDOWN_MS / 2);
+  } else if (outcome === 'rate-limit') {
+    health.failures += 1;
+    health.rateLimits += 1;
+    health.cooldownUntil = Math.max(health.cooldownUntil || 0, at + PROVIDER_RATE_LIMIT_COOLDOWN_MS);
+  } else {
+    health.failures += 1;
+  }
+  health.lastOutcome = outcome;
+  health.updatedAt = at;
+  providerHealth.set(provider, health);
+  return providerHealthSnapshot(provider, at);
+}
+
+function scoreSearchProviderHealth(provider, at = Date.now()) {
+  const health = decayedProviderHealth(provider, at);
+  const successRatioBonus = health.successes / Math.max(1, health.successes + health.failures);
+  const rawScore = 1
+    + health.successes * 0.25
+    + successRatioBonus * 0.35
+    - health.failures * 0.7
+    - health.rateLimits * 1.4;
+  const cooldownPenalty = health.cooldownUntil > at ? 0.18 : 1;
+  return Math.max(0.05, rawScore * cooldownPenalty);
+}
+
+function providerHealthSnapshot(provider, at = Date.now()) {
+  const health = decayedProviderHealth(provider, at);
+  return {
+    provider,
+    successes: Number(health.successes.toFixed(3)),
+    failures: Number(health.failures.toFixed(3)),
+    rateLimits: Number(health.rateLimits.toFixed(3)),
+    cooldownMs: Math.max(0, Math.round((health.cooldownUntil || 0) - at)),
+    lastOutcome: health.lastOutcome || null,
+    score: Number(scoreSearchProviderHealth(provider, at).toFixed(3)),
+  };
+}
+
+function getSearchProviderHealthSnapshot(at = Date.now()) {
+  const providers = uniqueStrings([...DIRECT_FRONTIER_PROVIDERS, 'duckduckgo-html', ...providerHealth.keys()]);
+  return providers.map((provider) => providerHealthSnapshot(provider, at));
+}
+
+// Raw (un-decayed) state for cross-restart persistence: keeps updatedAt so the
+// decay curve resumes correctly relative to real elapsed downtime, rather than
+// resetting the clock (which would let a cooling-down provider get re-hammered
+// immediately after a restart).
+function exportProviderHealthState() {
+  return [...providerHealth.entries()].map(([provider, health]) => ({ provider, ...health }));
+}
+
+function restoreProviderHealthState(entries = []) {
+  for (const entry of entries || []) {
+    if (!entry?.provider) continue;
+    providerHealth.set(entry.provider, {
+      successes: Number(entry.successes) || 0,
+      failures: Number(entry.failures) || 0,
+      rateLimits: Number(entry.rateLimits) || 0,
+      cooldownUntil: Number(entry.cooldownUntil) || 0,
+      updatedAt: Number(entry.updatedAt) || Date.now(),
+      lastOutcome: entry.lastOutcome || null,
+    });
+  }
+}
+
+function decayedProviderHealth(provider, at = Date.now()) {
+  const existing = providerHealth.get(provider) || {
+    successes: 0,
+    failures: 0,
+    rateLimits: 0,
+    cooldownUntil: 0,
+    updatedAt: at,
+    lastOutcome: null,
+  };
+  const elapsed = Math.max(0, at - (existing.updatedAt || at));
+  if (!elapsed) return { ...existing };
+  const decay = 0.5 ** (elapsed / PROVIDER_HEALTH_DECAY_HALF_LIFE_MS);
+  return {
+    ...existing,
+    successes: existing.successes * decay,
+    failures: existing.failures * decay,
+    rateLimits: existing.rateLimits * decay,
+    updatedAt: at,
+  };
+}
 
 const CURATED_MARKET_NEWS_SITES = [
   { domain: 'bloomberg.com', name: 'Bloomberg', url: 'https://www.bloomberg.com/', tags: ['market-news', 'macro', 'company-news'], credibilityScore: 82 },
@@ -42,7 +178,7 @@ async function crawlAutonomousResearch({
     queries: queries.slice(0, 12),
     maxRequests,
     maxWaves,
-    searchProviders: ['google', 'google-news', 'duckduckgo-best-effort-preflight'],
+    searchProviders: [...configuredDirectProviders(), 'duckduckgo-html-fallback', 'duckduckgo-best-effort-preflight'],
     curatedMarketNewsSites: CURATED_MARKET_NEWS_SITES.map((site) => site.domain),
   });
   const semanticContext = buildSemanticContext({ queries, seedSources });
@@ -90,6 +226,11 @@ async function crawlAutonomousResearch({
     });
     pages.push(...result.pages);
     failures.push(...result.failures);
+    const fallbackSearches = buildSearchFallbackRequests(result.failures, {
+      maxFallbacks: Math.max(0, maxSearchExpansions - searchExpansionCount),
+      onEvent,
+    }).filter((request) => rememberUrl(seenUrls, request.url));
+    searchExpansionCount += fallbackSearches.length;
     for (const page of result.pages) {
       for (const lead of extractEntityLeads(page)) {
         const existing = entityLeads.get(lead.key) || { ...lead, score: 0, evidence: [] };
@@ -120,7 +261,7 @@ async function crawlAutonomousResearch({
     const selected = candidates.slice(0, Math.min(maxFollowUps, Math.max(6, 18 - wave)));
     discovered.push(...selected);
 
-    if (!selected.length && !articleSearches.length) {
+    if (!selected.length && !articleSearches.length && !fallbackSearches.length) {
       emit(onEvent, 'crawlee-stop', 22 + wave * 3, 'debug', 'Crawlee stopped expanding because relevance dropped below the continuation threshold.', {
         wave,
         threshold: minContinuationScore,
@@ -140,6 +281,10 @@ async function crawlAutonomousResearch({
         reason: continuationReason(link),
       })).slice(0, 8),
       generatedSearches: articleSearches.slice(0, 8),
+      fallbackSearches: fallbackSearches.map((request) => ({
+        provider: request.userData?.searchProvider,
+        query: request.userData?.query,
+      })).slice(0, 8),
       entityLeads: [...entityLeads.values()].sort((a, b) => b.score - a.score).slice(0, 8).map((lead) => ({
         name: lead.name,
         symbol: lead.symbol,
@@ -147,23 +292,27 @@ async function crawlAutonomousResearch({
       })),
     });
 
-    frontier = [
-      ...selected.map((link) => ({
-        url: link.url,
-        userData: {
-          type: link.discoveryMethod || 'adaptive-follow-up',
-          depth: link.depth,
-          title: link.text,
-          discoveredFromUrl: link.discoveredFromUrl,
-          parentRelevance: link.parentRelevance,
-          parentWeightedEventScore: link.parentWeightedEventScore,
-        },
-      })),
-      ...articleSearches.flatMap((query) => buildSearchRequests(query).map((request) => ({
+    const selectedRequests = selected.map((link) => ({
+      url: link.url,
+      userData: {
+        type: link.discoveryMethod || 'adaptive-follow-up',
+        depth: link.depth,
+        title: link.text,
+        discoveredFromUrl: link.discoveredFromUrl,
+        parentRelevance: link.parentRelevance,
+        parentWeightedEventScore: link.parentWeightedEventScore,
+      },
+    }));
+    const articleSearchRequests = articleSearches.flatMap((query) => buildSearchRequests(query).map((request) => ({
         ...request,
         userData: { ...request.userData, type: 'article-derived-search', depth: wave + 1, parentWave: wave },
-      }))),
-    ].filter((request) => rememberUrl(seenUrls, request.url));
+      })))
+      .filter((request) => rememberUrl(seenUrls, request.url));
+    frontier = [
+      ...selectedRequests,
+      ...articleSearchRequests,
+      ...fallbackSearches,
+    ];
     wave += 1;
   }
 
@@ -310,6 +459,7 @@ async function crawlPages({ requests, label, maxRequestsPerCrawl, onEvent }) {
   const crawler = new CheerioCrawler({
     maxRequestsPerCrawl,
     maxConcurrency: 3,
+    maxRequestRetries: 2,
     requestHandlerTimeoutSecs: 20,
     navigationTimeoutSecs: 15,
     async requestHandler({ request, $, body }) {
@@ -337,6 +487,9 @@ async function crawlPages({ requests, label, maxRequestsPerCrawl, onEvent }) {
         userData: request.userData || {},
       };
       pages.push(page);
+      if (request.userData?.searchProvider) {
+        recordSearchProviderResult(request.userData.searchProvider, 'success');
+      }
       emit(onEvent, request.userData.depth ? 'crawlee-follow-up' : 'crawlee-fetch', request.userData.depth ? 20 : 15, 'debug', `Crawlee analyzed ${label} page.`, {
         title: page.title,
         url: page.url,
@@ -352,6 +505,25 @@ async function crawlPages({ requests, label, maxRequestsPerCrawl, onEvent }) {
         error: error.message,
         userData: request.userData || {},
       });
+      if (isRateLimited(error)) {
+        const provider = request.userData?.searchProvider || hostnameTitle(request.url);
+        if (request.userData?.searchProvider) {
+          recordSearchProviderResult(request.userData.searchProvider, 'rate-limit');
+        }
+        const nextProvider = nextFallbackProvider(request.userData);
+        const waitMs = Number(request.userData?.backoffMs) || config.rateLimits.retry.baseDelayMs;
+        emit(onEvent, 'crawlee-rate-limit', 16, 'warn',
+          `Rate limited (429) on ${provider}; retrying via ${nextProvider || 'no remaining provider'} in ${waitMs}ms.`, {
+            provider,
+            nextProvider,
+            waitMs,
+            url: request.url,
+          });
+        return;
+      }
+      if (request.userData?.searchProvider) {
+        recordSearchProviderResult(request.userData.searchProvider, 'failure');
+      }
       emit(onEvent, 'crawlee-fetch', 16, 'warn', 'Crawlee request failed; continuing with remaining research targets.', {
         url: request.url,
         error: error.message,
@@ -363,21 +535,118 @@ async function crawlPages({ requests, label, maxRequestsPerCrawl, onEvent }) {
   return { pages, failures };
 }
 
-function buildSearchRequests(query) {
-  const google = new URL('https://www.google.com/search');
-  google.searchParams.set('q', query);
-  google.searchParams.set('num', '10');
+function buildSearchRequests(query, { providerCount = DEFAULT_SEARCH_PROVIDERS.length } = {}) {
+  // Rotate which providers this query fans out to, so we distribute load across
+  // providers round-robin instead of always starting with Google.
+  return nextRoundRobinProviders(providerCount)
+    .map((provider) => buildSearchProviderRequest(query, provider))
+    .filter(Boolean);
+}
 
-  const googleNews = new URL('https://news.google.com/rss/search');
-  googleNews.searchParams.set('q', query);
-  googleNews.searchParams.set('hl', 'en-US');
-  googleNews.searchParams.set('gl', 'US');
-  googleNews.searchParams.set('ceid', 'US:en');
+function buildSearchProviderRequest(query, provider, userData = {}) {
+  if (provider === 'google') {
+    const google = new URL('https://www.google.com/search');
+    google.searchParams.set('q', query);
+    google.searchParams.set('num', '10');
+    return {
+      url: google.toString(),
+      userData: {
+        type: userData.type || 'google-search',
+        depth: userData.depth || 0,
+        query,
+        searchProvider: 'google',
+        attemptedSearchProviders: uniqueStrings([...(userData.attemptedSearchProviders || []), 'google']),
+        fallbackForProvider: userData.fallbackForProvider,
+      },
+    };
+  }
 
-  return [
-    { url: google.toString(), userData: { type: 'google-search', depth: 0, query } },
-    { url: googleNews.toString(), userData: { type: 'google-news-rss', depth: 0, query } },
-  ];
+  if (provider === 'google-news') {
+    const googleNews = new URL('https://news.google.com/rss/search');
+    googleNews.searchParams.set('q', query);
+    googleNews.searchParams.set('hl', 'en-US');
+    googleNews.searchParams.set('gl', 'US');
+    googleNews.searchParams.set('ceid', 'US:en');
+    return {
+      url: googleNews.toString(),
+      userData: {
+        type: userData.type || 'google-news-rss',
+        depth: userData.depth || 0,
+        query,
+        searchProvider: 'google-news',
+        attemptedSearchProviders: uniqueStrings([...(userData.attemptedSearchProviders || []), 'google-news']),
+        fallbackForProvider: userData.fallbackForProvider,
+      },
+    };
+  }
+
+  if (provider === 'bing') {
+    const bing = new URL('https://www.bing.com/search');
+    bing.searchParams.set('q', query);
+    bing.searchParams.set('count', '10');
+    return {
+      url: bing.toString(),
+      userData: {
+        type: userData.type || 'bing-search',
+        depth: userData.depth || 0,
+        query,
+        searchProvider: 'bing',
+        attemptedSearchProviders: uniqueStrings([...(userData.attemptedSearchProviders || []), 'bing']),
+        fallbackForProvider: userData.fallbackForProvider,
+      },
+    };
+  }
+
+  if (provider === 'duckduckgo-html') {
+    const duckDuckGo = new URL('https://duckduckgo.com/html/');
+    duckDuckGo.searchParams.set('q', query);
+    duckDuckGo.searchParams.set('kl', 'us-en');
+    return {
+      url: duckDuckGo.toString(),
+      userData: {
+        type: userData.type || 'duckduckgo-html-search',
+        depth: userData.depth || 0,
+        query,
+        searchProvider: 'duckduckgo-html',
+        attemptedSearchProviders: uniqueStrings([...(userData.attemptedSearchProviders || []), 'duckduckgo-html']),
+        fallbackForProvider: userData.fallbackForProvider,
+      },
+    };
+  }
+
+  if (provider === 'mojeek') {
+    const mojeek = new URL('https://www.mojeek.com/search');
+    mojeek.searchParams.set('q', query);
+    return {
+      url: mojeek.toString(),
+      userData: {
+        type: userData.type || 'mojeek-search',
+        depth: userData.depth || 0,
+        query,
+        searchProvider: 'mojeek',
+        attemptedSearchProviders: uniqueStrings([...(userData.attemptedSearchProviders || []), 'mojeek']),
+        fallbackForProvider: userData.fallbackForProvider,
+      },
+    };
+  }
+
+  if (provider === 'dogpile') {
+    const dogpile = new URL('https://www.dogpile.com/serp');
+    dogpile.searchParams.set('q', query);
+    return {
+      url: dogpile.toString(),
+      userData: {
+        type: userData.type || 'dogpile-search',
+        depth: userData.depth || 0,
+        query,
+        searchProvider: 'dogpile',
+        attemptedSearchProviders: uniqueStrings([...(userData.attemptedSearchProviders || []), 'dogpile']),
+        fallbackForProvider: userData.fallbackForProvider,
+      },
+    };
+  }
+
+  return null;
 }
 
 function buildMarketNewsSiteSearchRequests(queries, { queryLimit = 3, siteLimit = 10, includeDuckDuckGo = false } = {}) {
@@ -393,7 +662,14 @@ function buildMarketNewsSiteSearchRequests(queries, { queryLimit = 3, siteLimit 
 
       requests.push({
         url: google.toString(),
-        userData: { type: 'market-news-site-google-search', depth: 0, query: scopedQuery, site: site.domain },
+        userData: {
+          type: 'market-news-site-google-search',
+          depth: 0,
+          query: scopedQuery,
+          site: site.domain,
+          searchProvider: 'google',
+          attemptedSearchProviders: ['google'],
+        },
       });
       if (includeDuckDuckGo) {
         const duckDuckGo = new URL('https://duckduckgo.com/html/');
@@ -401,11 +677,64 @@ function buildMarketNewsSiteSearchRequests(queries, { queryLimit = 3, siteLimit 
         duckDuckGo.searchParams.set('kl', 'us-en');
         requests.push({
           url: duckDuckGo.toString(),
-          userData: { type: 'market-news-site-duckduckgo-search', depth: 0, query: scopedQuery, site: site.domain },
+          userData: {
+            type: 'market-news-site-duckduckgo-search',
+            depth: 0,
+            query: scopedQuery,
+            site: site.domain,
+            searchProvider: 'duckduckgo-html',
+            attemptedSearchProviders: ['duckduckgo-html'],
+          },
         });
       }
     }
   }
+  return requests;
+}
+
+function buildSearchFallbackRequests(failures = [], { maxFallbacks = 24, onEvent = () => {} } = {}) {
+  if (maxFallbacks <= 0) return [];
+  const requests = [];
+  const queued = new Set();
+  for (const failure of failures) {
+    const userData = failure.userData || {};
+    const failedProvider = userData.searchProvider;
+    const query = cleanText(userData.query);
+    if (!failedProvider || !query) continue;
+    const attempted = uniqueStrings(userData.attemptedSearchProviders || [failedProvider]);
+    const searchAttempt = Number(userData.searchAttempt || 0) + 1;
+    const backoffMs = Math.round(config.rateLimits.retry.baseDelayMs * 2 ** (searchAttempt - 1));
+    const providers = sortProvidersByHealth((SEARCH_PROVIDER_FALLBACKS[failedProvider] || [])
+      .filter((provider) => !attempted.includes(provider)));
+    for (const provider of providers) {
+      const request = buildSearchProviderRequest(query, provider, {
+        type: `${provider}-fallback-search`,
+        depth: Number(userData.depth || 0),
+        attemptedSearchProviders: attempted,
+        fallbackForProvider: failedProvider,
+      });
+      if (!request) continue;
+      request.userData.searchAttempt = searchAttempt;
+      request.userData.backoffMs = backoffMs;
+      const key = `${provider}:${normalizeQuery(query)}`;
+      if (queued.has(key)) continue;
+      queued.add(key);
+      requests.push(request);
+      if (requests.length >= maxFallbacks) break;
+    }
+    if (requests.length >= maxFallbacks) break;
+  }
+
+  if (requests.length) {
+    emit(onEvent, 'crawlee-search-fallback', 17, 'warn', 'Search provider failed after retries; queued fallback providers for the same query.', {
+      fallbackRequests: requests.map((request) => ({
+        query: request.userData.query,
+        provider: request.userData.searchProvider,
+        fallbackForProvider: request.userData.fallbackForProvider,
+      })).slice(0, 12),
+    });
+  }
+
   return requests;
 }
 
@@ -798,6 +1127,24 @@ function rememberUrl(seen, url) {
   return true;
 }
 
+function uniqueStrings(values = []) {
+  return [...new Set(values.map(cleanText).filter(Boolean))];
+}
+
+function isRateLimited(error) {
+  if (!error) return false;
+  if (Number(error.statusCode) === 429 || Number(error.status) === 429) return true;
+  return /\b429\b|too many requests|rate limit/i.test(String(error.message || ''));
+}
+
+function nextFallbackProvider(userData = {}) {
+  const failedProvider = userData.searchProvider;
+  const attempted = uniqueStrings(userData.attemptedSearchProviders || [failedProvider].filter(Boolean));
+  const candidates = sortProvidersByHealth((SEARCH_PROVIDER_FALLBACKS[failedProvider] || [])
+    .filter((provider) => !attempted.includes(provider)));
+  return candidates[0] || null;
+}
+
 function cleanUrl(url) {
   try {
     const parsed = new URL(url);
@@ -912,7 +1259,9 @@ module.exports = {
   extractEntityLeads,
   deriveSearchQueriesFromPage,
   buildSearchRequests,
+  buildSearchProviderRequest,
   buildMarketNewsSiteSearchRequests,
+  buildSearchFallbackRequests,
   buildDuckDuckGoResultRequests,
   discoverDuckDuckGoResults,
   extractDuckDuckGoResultLinks,
@@ -922,4 +1271,14 @@ module.exports = {
   classifyArticleEventCategories,
   selectPageSubLinks,
   unwrapSearchRedirect,
+  isRateLimited,
+  nextFallbackProvider,
+  recordSearchProviderResult,
+  getSearchProviderHealthSnapshot,
+  exportProviderHealthState,
+  restoreProviderHealthState,
+  scoreSearchProviderHealth,
+  sortProvidersByHealth,
+  resetSearchRoundRobin,
+  nextRoundRobinProviders,
 };

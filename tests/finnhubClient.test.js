@@ -1,3 +1,7 @@
+// Exercise Finnhub's error mapping directly without the resilientFetch retry
+// delays (retry/backoff itself is covered by resilientFetch.test.js).
+process.env.HTTP_RETRY_MAX = '0';
+
 const finnhubClient = require('../src/services/marketData/finnhubClient');
 
 describe('finnhubClient', () => {

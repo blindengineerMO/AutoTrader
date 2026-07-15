@@ -3,6 +3,8 @@ const logger = require('../utils/logger');
 const { runTradingCycle } = require('../services/tradingCycle');
 const autonomousResearchService = require('../services/autonomousResearchService');
 const evaluationService = require('../services/evaluationService');
+const eventOutcomeLabeling = require('../services/eventOutcomeLabelingService');
+const challengerScorerService = require('../services/challengerScorerService');
 const watcherAgentService = require('../services/watcherAgentService');
 const watcherBehaviorService = require('../services/watcherBehaviorService');
 const simulationModeService = require('../services/simulationModeService');
@@ -13,6 +15,12 @@ const settingsRepo = require('../db/repositories/settingsRepo');
 const userRepo = require('../db/repositories/userRepo');
 const researchRunRepo = require('../db/repositories/researchRunRepo');
 const timeSettings = require('../services/timeSettingsService');
+const idleResearchService = require('../services/idleResearchService');
+const searchProviderHealthPersistence = require('../services/searchProviderHealthPersistenceService');
+const alpacaDocumentService = require('../services/alpacaDocumentService');
+const simulationCashFundingService = require('../services/simulationCashFundingService');
+const excludedSymbolRecheckService = require('../services/excludedSymbolRecheckService');
+const { config } = require('../config');
 
 const scheduledTasks = new Map();
 const scheduledEvaluationTasks = new Map();
@@ -22,6 +30,10 @@ const scheduledSimulationOpenTasks = new Map();
 const scheduledSimulationCloseTasks = new Map();
 const scheduledAgentRefreshTasks = new Map();
 const scheduledPersonalityTickTasks = new Map();
+const scheduledIdleResearchTasks = new Map();
+const scheduledAlpacaDocumentTasks = new Map();
+const scheduledSimulationFundingTasks = new Map();
+const scheduledExcludedSymbolRecheckTasks = new Map();
 
 // Fallback hours used only if a watcher_cycle_cadence_cron can't be parsed at all.
 const DEFAULT_WATCHER_CYCLE_HOURS = [6, 10, 13, 16];
@@ -104,6 +116,11 @@ async function runCycleForUser(userId) {
   } catch (err) {
     logger.error('Scheduled trading cycle failed', { userId, error: err.message });
     if (run?.id) researchRunRepo.markFailed(run.id, err);
+  } finally {
+    // Snapshot search-provider health after every cycle (not just on clean
+    // shutdown) so an unexpected kill loses at most one cycle's worth of
+    // cooldown/success data rather than all of it.
+    searchProviderHealthPersistence.persist();
   }
 }
 
@@ -125,6 +142,17 @@ async function runEvaluationForUser(userId) {
     await evaluationService.runDailyEvaluation({ userId });
   } catch (err) {
     logger.error('Scheduled evaluation failed', { userId, error: err.message });
+  }
+  try {
+    await eventOutcomeLabeling.backfillOutcomes({ userId });
+    eventOutcomeLabeling.updateCategoryLearning({ userId });
+  } catch (err) {
+    logger.warn('Event training-label outcome backfill failed', { userId, error: err.message });
+  }
+  try {
+    challengerScorerService.trainChallenger({ userId });
+  } catch (err) {
+    logger.warn('Event-outcome challenger training failed', { userId, error: err.message });
   }
 }
 
@@ -166,6 +194,101 @@ function scheduleWatcherCycleForUser(userId, cronExpression, timeZone = timeSett
   const task = cron.schedule(cronExpression, () => runWatcherCycleForUser(userId, normalizedTimeZone, cronExpression), { timezone: normalizedTimeZone });
   scheduledWatcherCycleTasks.set(userId, task);
   logger.info('Scheduled watcher research cycle', { userId, cronExpression, timeZone: normalizedTimeZone });
+}
+
+async function runIdleResearchForUser(userId) {
+  try {
+    await idleResearchService.runIdleResearchTick({ userId });
+  } catch (err) {
+    logger.error('Scheduled idle research tick failed', { userId, error: err.message });
+  }
+}
+
+function scheduleIdleResearchForUser(userId, timeZone = timeSettings.DEFAULT_TIMEZONE) {
+  const existing = scheduledIdleResearchTasks.get(userId);
+  if (existing) existing.stop();
+  if (!config.idleResearch.enabled) return;
+  const cronExpression = config.idleResearch.cadenceCron;
+  if (!cron.validate(cronExpression)) {
+    logger.warn('Skipping invalid idle research cron expression', { userId, cronExpression });
+    return;
+  }
+  const normalizedTimeZone = timeSettings.normalizeTimeZone(timeZone);
+  const task = cron.schedule(cronExpression, () => runIdleResearchForUser(userId), { timezone: normalizedTimeZone });
+  scheduledIdleResearchTasks.set(userId, task);
+  logger.info('Scheduled idle background research', { userId, cronExpression, timeZone: normalizedTimeZone });
+}
+
+async function runAlpacaDocumentSyncForUser(userId) {
+  try {
+    const result = await alpacaDocumentService.syncMonthlyDocuments(userId);
+    logger.info('Scheduled Alpaca document sync complete', {
+      userId,
+      skipped: result.skipped,
+      count: result.items?.length || 0,
+      errors: result.errors?.length || 0,
+    });
+  } catch (err) {
+    logger.error('Scheduled Alpaca document sync failed', { userId, error: err.message });
+  }
+}
+
+function scheduleAlpacaDocumentSyncForUser(userId, settings = settingsRepo.get(userId)) {
+  const existing = scheduledAlpacaDocumentTasks.get(userId);
+  if (existing) existing.stop();
+  scheduledAlpacaDocumentTasks.delete(userId);
+  if (!settings) return;
+  const timeZone = timeSettings.normalizeTimeZone(settings.application_timezone);
+  const day = Math.min(28, Math.max(1, Number(settings.alpaca_statement_download_day) || 5));
+  const cronExpression = `20 3 ${day} * *`;
+  const task = cron.schedule(cronExpression, () => runAlpacaDocumentSyncForUser(userId), { timezone: timeZone });
+  scheduledAlpacaDocumentTasks.set(userId, task);
+  logger.info('Scheduled Alpaca statement/document sync', { userId, cronExpression, timeZone });
+}
+
+async function runExcludedSymbolRecheckForUser(userId) {
+  try {
+    const result = await excludedSymbolRecheckService.recheckExcludedSymbolsForUser(userId);
+    if (result.restored.length) {
+      logger.info('Excluded-symbol recheck restored symbols now tradable via Alpaca', { userId, restored: result.restored });
+    }
+  } catch (err) {
+    logger.error('Scheduled excluded-symbol recheck failed', { userId, error: err.message });
+  }
+}
+
+function scheduleExcludedSymbolRecheckForUser(userId, settings = settingsRepo.get(userId)) {
+  const existing = scheduledExcludedSymbolRecheckTasks.get(userId);
+  if (existing) existing.stop();
+  scheduledExcludedSymbolRecheckTasks.delete(userId);
+  if (!settings) return;
+  const timeZone = timeSettings.normalizeTimeZone(settings.application_timezone);
+  const cronExpression = '0 1 * * *';
+  const task = cron.schedule(cronExpression, () => runExcludedSymbolRecheckForUser(userId), { timezone: timeZone });
+  scheduledExcludedSymbolRecheckTasks.set(userId, task);
+  logger.info('Scheduled daily excluded-symbol recheck', { userId, cronExpression, timeZone });
+}
+
+async function runSimulationFundingForUser(userId) {
+  try {
+    const result = simulationCashFundingService.applyDueFunding(userId);
+    if (result.applied?.length) {
+      logger.info('Applied scheduled simulation cash funding', { userId, count: result.applied.length });
+    }
+  } catch (err) {
+    logger.error('Scheduled simulation cash funding failed', { userId, error: err.message });
+  }
+}
+
+function scheduleSimulationFundingForUser(userId, settings = settingsRepo.get(userId)) {
+  const existing = scheduledSimulationFundingTasks.get(userId);
+  if (existing) existing.stop();
+  scheduledSimulationFundingTasks.delete(userId);
+  if (!settings?.simulation_mode_enabled) return;
+  const timeZone = timeSettings.normalizeTimeZone(settings.application_timezone);
+  const task = cron.schedule('*/15 * * * *', () => runSimulationFundingForUser(userId), { timezone: timeZone });
+  scheduledSimulationFundingTasks.set(userId, task);
+  logger.info('Scheduled simulation cash funding watcher', { userId, cronExpression: '*/15 * * * *', timeZone });
 }
 
 async function runWatcherGradingForUser(userId) {
@@ -275,6 +398,10 @@ function scheduleUserAutomation(userId, settings = settingsRepo.get(userId)) {
   scheduleSimulationForUser(userId, settings);
   scheduleAgentPersonalityRefreshForUser(userId, settings);
   schedulePersonalityTickForUser(userId, settings.personality_tick_cadence_cron || '0 * * * *', timeZone);
+  scheduleIdleResearchForUser(userId, timeZone);
+  scheduleAlpacaDocumentSyncForUser(userId, settings);
+  scheduleSimulationFundingForUser(userId, settings);
+  scheduleExcludedSymbolRecheckForUser(userId, settings);
 }
 
 function scheduleAllUsers() {
@@ -294,6 +421,10 @@ function stopAll() {
   for (const task of scheduledSimulationCloseTasks.values()) task.stop();
   for (const task of scheduledAgentRefreshTasks.values()) task.stop();
   for (const task of scheduledPersonalityTickTasks.values()) task.stop();
+  for (const task of scheduledIdleResearchTasks.values()) task.stop();
+  for (const task of scheduledAlpacaDocumentTasks.values()) task.stop();
+  for (const task of scheduledSimulationFundingTasks.values()) task.stop();
+  for (const task of scheduledExcludedSymbolRecheckTasks.values()) task.stop();
   scheduledTasks.clear();
   scheduledEvaluationTasks.clear();
   scheduledWatcherCycleTasks.clear();
@@ -302,6 +433,10 @@ function stopAll() {
   scheduledSimulationCloseTasks.clear();
   scheduledAgentRefreshTasks.clear();
   scheduledPersonalityTickTasks.clear();
+  scheduledIdleResearchTasks.clear();
+  scheduledAlpacaDocumentTasks.clear();
+  scheduledSimulationFundingTasks.clear();
+  scheduledExcludedSymbolRecheckTasks.clear();
 }
 
 module.exports = {
@@ -315,6 +450,14 @@ module.exports = {
   scheduleAgentPersonalityRefreshForUser,
   schedulePersonalityTickForUser,
   runPersonalityTickForUser,
+  scheduleIdleResearchForUser,
+  runIdleResearchForUser,
+  scheduleAlpacaDocumentSyncForUser,
+  runAlpacaDocumentSyncForUser,
+  scheduleSimulationFundingForUser,
+  runSimulationFundingForUser,
+  scheduleExcludedSymbolRecheckForUser,
+  runExcludedSymbolRecheckForUser,
   scheduleUserAutomation,
   scheduleAllUsers,
   stopAll,

@@ -1,3 +1,4 @@
+const { resilientFetch } = require('../utils/resilientFetch');
 const DATASET_SOURCES = [
   { id: 'currency-usd', category: 'currency', name: 'Exchange Rate API USD', url: 'https://api.exchangerate-api.com/v4/latest/USD' },
   { id: 'currency-gbp', category: 'currency', name: 'Exchange Rate API GBP', url: 'https://api.exchangerate-api.com/v4/latest/GBP' },
@@ -310,13 +311,13 @@ async function fetchWithTimeout(url, timeoutMs) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, {
+    return await resilientFetch(url, {
       signal: controller.signal,
       headers: {
         Accept: 'application/json,application/geo+json,text/plain,*/*',
         'User-Agent': 'Mozilla/5.0 AutoTrader JSON dataset evaluator',
       },
-    });
+    }, { bucket: 'json-dataset', timeoutMs: 0 });
   } finally {
     clearTimeout(timeout);
   }

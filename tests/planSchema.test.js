@@ -41,8 +41,18 @@ describe('planSchema.tradingPlanSchema', () => {
     expect(result.success).toBe(false);
   });
 
-  it('rejects a plan with more than 10 actions', () => {
-    const actions = Array.from({ length: 11 }, (_, i) => ({
+  it('accepts expanded action lists so all owned positions can be reviewed', () => {
+    const actions = Array.from({ length: 50 }, (_, i) => ({
+      symbol: `SYM${i}`,
+      action: 'hold',
+      rationale: 'Filler action for owned-position review capacity.',
+    }));
+    const result = tradingPlanSchema.safeParse({ actions, overallRationale: 'Reviewing current positions.' });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects a plan with more than 50 actions', () => {
+    const actions = Array.from({ length: 51 }, (_, i) => ({
       symbol: `SYM${i}`,
       action: 'hold',
       rationale: 'Filler action to exceed the cap.',

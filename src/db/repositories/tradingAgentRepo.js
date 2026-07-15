@@ -175,9 +175,13 @@ function deserializeRun(row) {
 }
 
 function deserializeRecommendation(row) {
+  const evidence = JSON.parse(row.evidence_json || '{}');
   return {
     ...row,
-    evidence: JSON.parse(row.evidence_json || '{}'),
+    evidence,
+    reviewType: evidence.reviewType || null,
+    positionAction: evidence.positionAction || null,
+    ownedPosition: evidence.ownedPosition || null,
   };
 }
 

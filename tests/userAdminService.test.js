@@ -82,4 +82,58 @@ describe('userAdminService', () => {
     expect(userAdminService.updateUser(admin.id, { role: 'user' }).role).toBe('user');
     expect(userRepo.findById(secondAdmin.id).role).toBe('admin');
   });
+
+  it('queries users with search, filters, sort, and pagination', async () => {
+    await userAdminService.ensureDefaultAdmin();
+    await userAdminService.createUser({
+      email: 'alpha-user@example.com',
+      password: 'alpha-password',
+      role: 'user',
+    });
+    await userAdminService.createUser({
+      email: 'zeta-admin@example.com',
+      password: 'zeta-password',
+      role: 'admin',
+    });
+    await userAdminService.createUser({
+      email: 'disabled-match@example.com',
+      password: 'disabled-password',
+      status: 'disabled',
+    });
+
+    const searched = userAdminService.listUsers({
+      search: 'example.com',
+      status: 'active',
+      sortBy: 'email',
+      sortDir: 'asc',
+      page: 1,
+      pageSize: 2,
+    });
+
+    expect(searched.items).toHaveLength(2);
+    expect(searched.total).toBeGreaterThanOrEqual(2);
+    expect(searched.totalPages).toBeGreaterThanOrEqual(1);
+    expect(searched.items.map((user) => user.email)).toEqual([...searched.items.map((user) => user.email)].sort());
+
+    const admins = userAdminService.listUsers({ role: 'admin', search: 'zeta' });
+    expect(admins.items.map((user) => user.email)).toContain('zeta-admin@example.com');
+  });
+
+  it('deletes users while protecting the current account and last active admin', async () => {
+    const admin = await userAdminService.ensureDefaultAdmin();
+    const disposable = await userAdminService.createUser({
+      email: 'delete-me@example.com',
+      password: 'delete-password',
+      role: 'user',
+    });
+
+    expect(() => userAdminService.deleteUser(admin.id, { actorId: admin.id })).toThrow(/own account/);
+    expect(userAdminService.deleteUser(disposable.id, { actorId: admin.id })).toEqual({ deleted: true, id: disposable.id });
+    expect(userRepo.findById(disposable.id)).toBeUndefined();
+
+    for (const otherAdmin of userAdminService.listUsers().filter((user) => user.id !== admin.id && user.role === 'admin' && user.status === 'active')) {
+      userAdminService.updateUser(otherAdmin.id, { role: 'user' });
+    }
+    expect(() => userAdminService.deleteUser(admin.id, { actorId: 999999 })).toThrow(/At least one active admin/);
+  });
 });

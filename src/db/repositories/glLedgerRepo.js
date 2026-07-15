@@ -79,6 +79,51 @@ function recordTrade({
   return tx();
 }
 
+function recordCashFunding({
+  userId,
+  brokerAccountId = null,
+  amountUsd = 0,
+  balanceAfterUsd = null,
+  currency = 'USD',
+  sourceType = 'simulation_cash_funding',
+  memo = null,
+}) {
+  const amount = roundMoney(amountUsd);
+  if (!userId || amount <= 0) return [];
+  const common = {
+    userId,
+    brokerAccountId,
+    orderId: null,
+    planActionId: null,
+    symbol: 'CASH',
+    quantity: null,
+    unitPrice: null,
+    currency,
+    sourceType,
+    memo: memo || `Simulation cash funding +${amount}`,
+  };
+  const cash = {
+    ...common,
+    accountCode: '1000',
+    accountName: 'Cash',
+    debit: amount,
+    credit: 0,
+  };
+  const funding = {
+    ...common,
+    accountCode: '3900',
+    accountName: 'Simulation Funding',
+    debit: 0,
+    credit: amount,
+  };
+  const tx = db.transaction(() => {
+    const first = insertEntryStmt.run(cash).lastInsertRowid;
+    const second = insertEntryStmt.run(funding).lastInsertRowid;
+    return [first, second];
+  });
+  return tx();
+}
+
 function listByUser(userId, limit = 100) {
   return listByUserStmt.all(userId, Number(limit) || 100);
 }
@@ -97,6 +142,7 @@ function roundMoney(value) {
 
 module.exports = {
   recordTrade,
+  recordCashFunding,
   listByUser,
   listByCompany,
   listCompanySymbols,

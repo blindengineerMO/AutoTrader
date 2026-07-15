@@ -8,6 +8,24 @@ const insertRun = db.prepare(`
 const byId = db.prepare('SELECT * FROM research_runs WHERE id = ?');
 const latestByUser = db.prepare('SELECT * FROM research_runs WHERE user_id = ? ORDER BY started_at DESC LIMIT ?');
 
+// Reconcile runs left in queued/running by an unexpected restart. Anything older
+// than the threshold is marked failed so it never blocks a future cycle; the next
+// scheduled cron re-runs the work fresh (training is idempotent from the last
+// atomically-saved model).
+const markStaleRunningStmt = db.prepare(`
+  UPDATE research_runs
+  SET status = 'failed',
+      phase = 'failed',
+      error = 'terminated_by_restart',
+      completed_at = datetime('now')
+  WHERE status IN ('queued', 'running')
+    AND started_at <= datetime('now', @cutoff)
+`);
+const listStaleRunningStmt = db.prepare(`
+  SELECT id FROM research_runs
+  WHERE status IN ('queued', 'running') AND started_at <= datetime('now', @cutoff)
+`);
+
 const updateState = db.prepare(`
   UPDATE research_runs
   SET status = @status,
@@ -137,12 +155,20 @@ function getById(id) {
   return deserialize(byId.get(id));
 }
 
+function markStaleRunning({ olderThanMinutes = 0 } = {}) {
+  const cutoff = `-${Math.max(0, olderThanMinutes)} minutes`;
+  const stale = listStaleRunningStmt.all({ cutoff }).map((row) => row.id);
+  markStaleRunningStmt.run({ cutoff });
+  return stale;
+}
+
 module.exports = {
   create,
   appendEvent,
   markStarted,
   markComplete,
   markFailed,
+  markStaleRunning,
   getById,
   listByUser: (userId, limit = 10) => latestByUser.all(userId, limit).map(deserialize),
 };

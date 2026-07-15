@@ -79,4 +79,52 @@ describe('agentDecisionTreeService', () => {
     expect(result.recommendedAction).not.toBe('buy');
     expect(result.decision.warnings.length).toBeGreaterThan(0);
   });
+
+  it('keeps analyst-driven ideas on hold when the practical analyst gate fails', () => {
+    const result = agentDecisionTree.evaluateSignalForAgent({
+      agent,
+      personaBiasScore: 100,
+      signal: {
+        symbol: 'AAPL',
+        price: 100,
+        changePct: 1,
+        volatilityPct: 1.2,
+        momentum: 'bullish',
+        actionBias: 'buy-candidate',
+        localAiScore: 95,
+        brokerFactorScore: 92,
+        investorPlaybookScore: 94,
+        jsonDatasetScore: 90,
+        theme: 'software+consumer',
+        evidence: {
+          quote: { current: 100, open: 99, high: 101, low: 98, prevClose: 99 },
+          explanation: ['Analyst says Buy, but no SEC or valuation corroboration is attached.'],
+          analystDecisionGate: {
+            version: 'analyst-decision-gate-v1',
+            symbol: 'AAPL',
+            analystDriven: true,
+            passed: false,
+            status: 'analyst-evidence-blocked',
+            compositeScore: 38,
+            summary: 'Analyst evidence is not sufficient for a buy candidate yet.',
+            gates: [
+              { key: 'analyst-upgrade-detected', passed: false },
+              { key: 'sec-filing-data-supports-thesis', passed: false },
+            ],
+          },
+        },
+        discovery: {
+          evidence: [{ reason: 'New product thesis found in crawled source.', url: 'https://example.com/source' }],
+        },
+      },
+      context: { signals: [{ symbol: 'AAPL', localAiScore: 95 }], positions: [], accountState: { cash_balance_usd: 2000 } },
+    });
+
+    expect(result.gates.find((gate) => gate.name === 'analyst-recommendation-gate')).toMatchObject({
+      status: 'warn',
+      score: 38,
+    });
+    expect(result.recommendedAction).toBe('hold');
+    expect(result.decision.decision).toBe('HOLD');
+  });
 });

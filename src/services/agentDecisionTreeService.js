@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const analystDecisionGate = require('./analystDecisionGateService');
 
 const VERSION = 'agent-decision-tree-v1';
 
@@ -29,6 +30,7 @@ const DECISION_STEP_IDS = Object.freeze([
   'future-fundamentals',
   'intrinsic-value',
   'market-expectations',
+  'analyst-recommendation-gate',
   'catalysts',
   'threats-premortem',
   'news-and-alternative-data',
@@ -229,6 +231,19 @@ function evaluateSignalForAgent({ agent, signal, context = {}, personaBiasScore 
     expectationsScore < 45 ? 'Market expectations may already be aggressive or crowded.' : 'Current expectations appear reasonable relative to evidence.',
     { changePct, volatilityPct, localAiScore }
   ));
+
+  const analystGate = signal?.evidence?.analystDecisionGate || signal?.analystDecisionGate || analystDecisionGate.evaluateAnalystDecisionGate({ signal });
+  if (analystGate.analystDriven) {
+    gates.push(gate(
+      'analyst-recommendation-gate',
+      analystGate.passed ? 'pass' : 'warn',
+      analystGate.compositeScore,
+      analystGate.passed
+        ? 'Analyst evidence passed the practical decision rule and may proceed to the rest of the decision tree.'
+        : 'Analyst evidence is blocked from driving a buy decision until freshness, material-change, credibility, SEC, valuation, liquidity, and portfolio-risk checks pass.',
+      analystGate
+    ));
+  }
 
   const catalysts = buildCatalysts(signal, discoveryEvidence, chatReasons);
   gates.push(gate(
@@ -773,6 +788,8 @@ function chooseAction({ signal, scores, gates, hardFailures, sellTree, valuation
   if (valuation.marginOfSafety < 0) return scores.overall <= 40 ? 'sell' : 'hold';
   const failedSoft = gates.filter((item) => item.status === 'fail' && !item.hard).map((item) => item.name);
   if (failedSoft.includes('intrinsic-value')) return 'hold';
+  const analystGate = gates.find((item) => item.name === 'analyst-recommendation-gate');
+  if (analystGate?.evidence?.analystDriven && !analystGate.evidence.passed) return 'hold';
   if (scores.overall >= 72 && valuation.marginOfSafety >= mandate.requiredMarginOfSafety) return 'buy';
   if (scores.overall >= 55) return 'watch';
   if (scores.overall <= 34) return 'sell';

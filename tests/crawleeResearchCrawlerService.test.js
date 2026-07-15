@@ -3,6 +3,7 @@ const {
   scoreText,
   extractLocalEventResearchQueries,
   buildSearchRequests,
+  buildSearchFallbackRequests,
   buildMarketNewsSiteSearchRequests,
   CURATED_MARKET_NEWS_SITES,
   buildDuckDuckGoResultRequests,
@@ -10,6 +11,14 @@ const {
   extractLinks,
   selectPageSubLinks,
   classifyArticleEventCategories,
+  resetSearchRoundRobin,
+  nextRoundRobinProviders,
+  isRateLimited,
+  nextFallbackProvider,
+  recordSearchProviderResult,
+  getSearchProviderHealthSnapshot,
+  scoreSearchProviderHealth,
+  sortProvidersByHealth,
 } = require('../src/services/crawleeResearchCrawlerService');
 
 describe('crawleeResearchCrawlerService relevance scoring', () => {
@@ -37,15 +46,133 @@ describe('crawleeResearchCrawlerService relevance scoring', () => {
     ]));
   });
 
-  it('keeps slow DuckDuckGo pages out of the direct Crawlee search frontier', () => {
+  it('keeps slow DuckDuckGo and hostile Yandex pages out of the direct Crawlee search frontier', () => {
+    resetSearchRoundRobin();
     const requests = buildSearchRequests('AI chip market news');
     const types = requests.map((request) => request.userData.type);
 
-    expect(types).toEqual(expect.arrayContaining([
-      'google-search',
-      'google-news-rss',
-    ]));
+    expect(types).toEqual(['google-search', 'google-news-rss']);
     expect(requests.some((request) => request.url.includes('duckduckgo.com'))).toBe(false);
+    expect(requests.some((request) => request.url.includes('yandex.com'))).toBe(false);
+  });
+
+  it('rotates the starting provider round-robin across consecutive queries', () => {
+    resetSearchRoundRobin();
+    const first = buildSearchRequests('query one').map((request) => request.userData.searchProvider);
+    const second = buildSearchRequests('query two').map((request) => request.userData.searchProvider);
+
+    expect(first[0]).toBe('google');
+    expect(second[0]).not.toBe('google');
+  });
+
+  it('weights provider rotation away from recently unhealthy providers', () => {
+    resetSearchRoundRobin();
+    const now = Date.now();
+    recordSearchProviderResult('google', 'rate-limit', now);
+    recordSearchProviderResult('google', 'failure', now + 100);
+    recordSearchProviderResult('bing', 'success', now + 200);
+    recordSearchProviderResult('mojeek', 'success', now + 300);
+
+    const selected = nextRoundRobinProviders(2);
+    const health = getSearchProviderHealthSnapshot(now + 400);
+
+    expect(selected).toEqual(expect.arrayContaining(['bing', 'mojeek']));
+    expect(selected).not.toContain('google');
+    expect(health.find((provider) => provider.provider === 'google')).toMatchObject({
+      cooldownMs: expect.any(Number),
+      lastOutcome: 'failure',
+    });
+    expect(scoreSearchProviderHealth('google', now + 400)).toBeLessThan(scoreSearchProviderHealth('bing', now + 400));
+  });
+
+  it('orders fallback candidates by provider health without dropping exploration candidates', () => {
+    resetSearchRoundRobin();
+    const now = Date.now();
+    recordSearchProviderResult('bing', 'rate-limit', now);
+    recordSearchProviderResult('mojeek', 'success', now + 100);
+
+    expect(sortProvidersByHealth(['bing', 'mojeek', 'dogpile'])[0]).toBe('mojeek');
+    expect(nextFallbackProvider({ searchProvider: 'google', attemptedSearchProviders: ['google'] })).toBe('mojeek');
+  });
+
+  it('includes Mojeek and Dogpile in the round-robin provider policy', () => {
+    resetSearchRoundRobin();
+    const requests = buildSearchRequests('public company product launch', { providerCount: 5 });
+
+    expect(requests.map((request) => request.userData.searchProvider)).toEqual(expect.arrayContaining([
+      'mojeek',
+      'dogpile',
+    ]));
+    expect(requests.some((request) => request.url.includes('mojeek.com/search'))).toBe(true);
+    expect(requests.some((request) => request.url.includes('dogpile.com/serp'))).toBe(true);
+    expect(requests.some((request) => request.url.includes('yandex.com'))).toBe(false);
+  });
+
+  it('builds scraper-friendlier Mojeek and Dogpile fallback requests instead of Yandex', () => {
+    const requests = buildSearchFallbackRequests([
+      {
+        userData: {
+          query: 'defense contractor backlog',
+          searchProvider: 'google',
+          attemptedSearchProviders: ['google', 'bing', 'duckduckgo-html'],
+        },
+      },
+    ]);
+    const providers = requests.map((request) => request.userData.searchProvider);
+    expect(providers).toEqual(expect.arrayContaining(['mojeek', 'dogpile']));
+    expect(providers).not.toContain('yandex');
+    expect(requests.find((request) => request.userData.searchProvider === 'mojeek').url).toContain('mojeek.com/search');
+    expect(requests.find((request) => request.userData.searchProvider === 'dogpile').url).toContain('dogpile.com/serp');
+  });
+
+  it('detects a 429 error and names the next fallback provider', () => {
+    expect(isRateLimited({ message: 'Request blocked with status code 429' })).toBe(true);
+    expect(isRateLimited({ statusCode: 429 })).toBe(true);
+    expect(isRateLimited({ message: 'ECONNRESET' })).toBe(false);
+    expect(nextFallbackProvider({ searchProvider: 'google', attemptedSearchProviders: ['google'] })).toBe('bing');
+  });
+
+  it('queues Bing and DuckDuckGo fallback searches when Google fails after retries', () => {
+    const events = [];
+    const requests = buildSearchFallbackRequests([
+      {
+        url: 'https://www.google.com/search?q=semiconductor+earnings',
+        error: 'request failed after 2 retries',
+        userData: {
+          query: 'semiconductor earnings',
+          searchProvider: 'google',
+          attemptedSearchProviders: ['google'],
+        },
+      },
+    ], { onEvent: (event) => events.push(event) });
+
+    expect(requests.map((request) => request.userData.searchProvider)).toEqual(expect.arrayContaining([
+      'bing',
+      'mojeek',
+      'dogpile',
+      'duckduckgo-html',
+    ]));
+    expect(requests.map((request) => request.userData.fallbackForProvider)).toEqual(expect.arrayContaining(['google']));
+    expect(requests.some((request) => request.url.includes('bing.com/search'))).toBe(true);
+    expect(requests.some((request) => request.url.includes('duckduckgo.com/html'))).toBe(true);
+    expect(events[0]).toMatchObject({
+      phase: 'crawlee-search-fallback',
+      level: 'warn',
+    });
+  });
+
+  it('does not requeue already-attempted search providers during fallback', () => {
+    const requests = buildSearchFallbackRequests([
+      {
+        userData: {
+          query: 'EV battery recall',
+          searchProvider: 'google',
+          attemptedSearchProviders: ['google', 'bing', 'duckduckgo-html', 'mojeek', 'dogpile'],
+        },
+      },
+    ]);
+
+    expect(requests.map((request) => request.userData.searchProvider)).toEqual(['google-news']);
   });
 
   it('adds bounded market-news site searches for company announcements and products', () => {

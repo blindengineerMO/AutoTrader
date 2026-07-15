@@ -1,5 +1,10 @@
 const { config } = require('../../config');
 const logger = require('../../utils/logger');
+const { resilientFetch } = require('../../utils/resilientFetch');
+const httpCache = require('../../utils/httpCache');
+
+const PROFILE_TTL_MS = 12 * 60 * 60 * 1000; // company profile changes rarely
+const METRICS_TTL_MS = 60 * 60 * 1000; // basic financials refresh hourly at most
 
 const BASE_URL = 'https://finnhub.io/api/v1';
 
@@ -11,7 +16,14 @@ async function get(path, params = {}, apiKey = config.finnhubApiKey) {
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   url.searchParams.set('token', apiKey);
 
-  const res = await fetch(url.toString());
+  const res = await resilientFetch(url.toString(), {}, {
+    bucket: 'finnhub',
+    perMinute: config.rateLimits.finnhub,
+    provider: 'finnhub',
+    onRetry: ({ attempt, delayMs, status }) => {
+      logger.warn(`Finnhub ${status || 'network'} retry ${attempt}; waiting ${delayMs}ms before retry`, { path });
+    },
+  });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`Finnhub request failed: ${res.status} ${res.statusText} ${body}`);
@@ -56,11 +68,11 @@ async function searchSymbol(query, { apiKey } = {}) {
 }
 
 async function getCompanyProfile(symbol, { apiKey } = {}) {
-  return get('/stock/profile2', { symbol }, apiKey);
+  return httpCache.getOrFetch(`finnhub:profile:${symbol}`, PROFILE_TTL_MS, () => get('/stock/profile2', { symbol }, apiKey));
 }
 
 async function getBasicFinancials(symbol, { apiKey, metric = 'all' } = {}) {
-  return get('/stock/metric', { symbol, metric }, apiKey);
+  return httpCache.getOrFetch(`finnhub:metrics:${symbol}:${metric}`, METRICS_TTL_MS, () => get('/stock/metric', { symbol, metric }, apiKey));
 }
 
 async function getCompanyNews(symbol, { apiKey, from, to } = {}) {
@@ -74,11 +86,19 @@ async function getRecommendationTrends(symbol, { apiKey } = {}) {
   return get('/stock/recommendation', { symbol }, apiKey);
 }
 
+async function getEarnings(symbol, { apiKey } = {}) {
+  return get('/stock/earnings', { symbol }, apiKey);
+}
+
 async function researchCompany(symbol, { apiKey } = {}) {
   const cleanSymbol = String(symbol || '').toUpperCase();
   const result = { symbol: cleanSymbol, available: Boolean(apiKey), errors: [] };
   if (!apiKey || !cleanSymbol) return result;
 
+  // The 5 calls are independent of one another (none consumes another's
+  // result), so they run concurrently — the rate limiter still paces the
+  // underlying fetches to config.rateLimits.finnhub, but a retry on one no
+  // longer blocks the others from starting.
   const calls = [
     ['quote', () => getQuote(cleanSymbol, apiKey)],
     ['profile', () => getCompanyProfile(cleanSymbol, { apiKey })],
@@ -86,14 +106,16 @@ async function researchCompany(symbol, { apiKey } = {}) {
     ['news', () => getCompanyNews(cleanSymbol, { apiKey })],
     ['recommendations', () => getRecommendationTrends(cleanSymbol, { apiKey })],
   ];
-  for (const [key, fn] of calls) {
-    try {
-      result[key] = await fn();
-    } catch (err) {
-      result.errors.push({ key, error: err.message });
-      logger.warn('Finnhub company research call failed', { symbol: cleanSymbol, key, error: err.message });
+  const settled = await Promise.allSettled(calls.map(([, fn]) => fn()));
+  settled.forEach((outcome, index) => {
+    const [key] = calls[index];
+    if (outcome.status === 'fulfilled') {
+      result[key] = outcome.value;
+    } else {
+      result.errors.push({ key, error: outcome.reason.message });
+      logger.warn('Finnhub company research call failed', { symbol: cleanSymbol, key, error: outcome.reason.message });
     }
-  }
+  });
   return result;
 }
 
@@ -105,5 +127,6 @@ module.exports = {
   getBasicFinancials,
   getCompanyNews,
   getRecommendationTrends,
+  getEarnings,
   researchCompany,
 };

@@ -92,7 +92,7 @@ function updateAgentWeightsFromEvaluations(userId, evaluations) {
 }
 
 function isAgentRecommendationHit(action, returnPct) {
-  if (action === 'buy') return returnPct > 0;
+  if (action === 'buy' || action === 'buy_more') return returnPct > 0;
   if (action === 'sell') return returnPct < 0;
   if (action === 'watch' || action === 'hold') return Math.abs(returnPct) < 1.5;
   return false;

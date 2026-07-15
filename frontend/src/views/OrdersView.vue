@@ -1,6 +1,6 @@
 <template>
   <div class="page-shell">
-    <div class="mb-10">
+    <div class="ops-command-bar mb-6">
       <p class="page-kicker mb-3">Every order this account has submitted</p>
       <h1 class="page-title">Trade Log</h1>
     </div>

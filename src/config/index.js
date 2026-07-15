@@ -87,6 +87,10 @@ const config = {
   finnhubApiKey: process.env.FINNHUB_API_KEY || '',
   openAlexApiKey: process.env.OPENALEX_API_KEY || '',
   openFdaApiKey: process.env.OPENFDA_API_KEY || '',
+  blsApiKey: process.env.BLS_API_KEY || process.env.BLS_REGISTRATION_KEY || '',
+  beaApiKey: process.env.BEA_API_KEY || '',
+  eiaApiKey: process.env.EIA_API_KEY || '',
+  usdaAmsApiKey: process.env.USDA_AMS_API_KEY || process.env.MYMARKETNEWS_API_KEY || '',
   reliefWebAppName: process.env.RELIEFWEB_APP_NAME || '',
   nwsUserAgent: process.env.NWS_USER_AGENT || process.env.NOAA_USER_AGENT || '',
   censusApiKey: process.env.CENSUS_API_KEY || '',
@@ -112,6 +116,18 @@ const config = {
       process.env.ALPACA_BASE_URL ||
       process.env.APCA_API_BASE_URL ||
       (bool(process.env.ALPACA_PAPER, true) ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets'),
+    brokerBaseUrl:
+      process.env.ALPACA_BROKER_BASE_URL ||
+      (bool(process.env.ALPACA_PAPER, true) ? 'https://broker-api.sandbox.alpaca.markets' : 'https://broker-api.alpaca.markets'),
+    brokerAccountId: process.env.ALPACA_BROKER_ACCOUNT_ID || process.env.ALPACA_ACCOUNT_ID || '',
+  },
+
+  stripe: {
+    publishableKey: process.env.STRIPE_PUBLISHABLE_KEY || '',
+    secretKey: process.env.STRIPE_SECRET_KEY || '',
+    webhookSecret: process.env.STRIPE_WEBHOOK_SECRET || '',
+    defaultPriceId: process.env.STRIPE_DEFAULT_PRICE_ID || '',
+    billingPortalReturnUrl: process.env.STRIPE_BILLING_PORTAL_RETURN_URL || '',
   },
 
   trading: {
@@ -124,6 +140,30 @@ const config = {
 
   articleLlmComprehensionEnabled: bool(process.env.ARTICLE_LLM_COMPREHENSION_ENABLED, true),
   articleLlmComprehensionMaxPerRun: num(process.env.ARTICLE_LLM_COMPREHENSION_MAX_PER_RUN, 4),
+
+  rateLimits: {
+    finnhub: num(process.env.FINNHUB_RATE_PER_MIN, 58),
+    search: num(process.env.SEARCH_RATE_PER_MIN, 30),
+    defaultSource: num(process.env.SOURCE_RATE_PER_MIN, 60),
+    retry: {
+      maxRetries: num(process.env.HTTP_RETRY_MAX, 4),
+      baseDelayMs: num(process.env.HTTP_RETRY_BASE_DELAY_MS, 500),
+    },
+  },
+
+  search: {
+    providers: process.env.SEARCH_PROVIDERS
+      ? list(process.env.SEARCH_PROVIDERS)
+      : ['google', 'google-news', 'bing', 'mojeek', 'dogpile', 'duckduckgo-html'],
+  },
+
+  idleResearch: {
+    enabled: bool(process.env.IDLE_RESEARCH_ENABLED, true),
+    cadenceCron: process.env.IDLE_RESEARCH_CADENCE_CRON || '15 * * * *',
+    maxCompaniesPerTick: num(process.env.IDLE_RESEARCH_MAX_COMPANIES_PER_TICK, 3),
+  },
+
+  ollamaResearchReasoningEnabled: bool(process.env.OLLAMA_RESEARCH_REASONING_ENABLED, true),
 };
 
 /**

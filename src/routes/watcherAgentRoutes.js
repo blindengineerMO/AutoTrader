@@ -1,6 +1,7 @@
 const express = require('express');
 const watcherAgentRepo = require('../db/repositories/watcherAgentRepo');
 const brainMesh = require('../services/brainMeshService');
+const watcherAgentService = require('../services/watcherAgentService');
 
 const router = express.Router();
 
@@ -20,6 +21,14 @@ function toSummary(agent) {
 router.get('/', (req, res) => {
   const agents = watcherAgentRepo.listActiveByUser(req.user.id);
   res.json(agents.map(toSummary));
+});
+
+router.post('/training-backfill-30d', async (req, res, next) => {
+  try {
+    res.json(await watcherAgentService.runThirtyDayTrainingBackfill(req.user.id, { force: true }));
+  } catch (err) {
+    next(err);
+  }
 });
 
 router.get('/:symbol', (req, res) => {
