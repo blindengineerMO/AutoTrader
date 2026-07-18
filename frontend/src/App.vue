@@ -127,6 +127,6 @@ const initials = computed(() => {
 function logout() {
   profileOpen.value = false;
   auth.logout();
-  router.push({ name: 'login' });
+  router.push({ name: 'home' });
 }
 </script>

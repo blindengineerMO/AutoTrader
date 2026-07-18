@@ -51,7 +51,6 @@ const nifcWildfires = require('./nifcWildfireService');
 const usDroughtMonitor = require('./usDroughtMonitorService');
 const brainMesh = require('./brainMeshService');
 const watcherAgentService = require('./watcherAgentService');
-const crawleeCrawler = require('./crawleeResearchCrawlerService');
 const httpCache = require('../utils/httpCache');
 const { config } = require('../config');
 const logger = require('../utils/logger');
@@ -179,7 +178,7 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
 
   const [learned, news, macro, consumer, jsonDatasets, businessFormation, businessDynamics, energyFuel, vehicleSalesContext, blsPricingContext, consumerGoodsContext, finvizContext, tradingViewContext, yahooFinanceContext, nasdaqContext, marketBeatContext, wallStreetZenContext, finraContext, ownershipContext, federalAwardsContext, dodContractsContext, disasterContext, naturalEventContext, humanitarianContext, refugeeContext, historicalDisasterContext, earthquakeContext, weatherAlertContext, nuclearEventContext, wildfireContext, droughtContext] = await Promise.all([
     sourceLearning.collectLearnedResearch({ userId, researchRunId, onEvent }),
-    collectNews(onEvent),
+    collectNews(onEvent, { userId }),
     collectMacroData(onEvent),
     collectConsumerSales(userId, onEvent),
     jsonDatasetIndicators.collectJsonDatasetIndicators({ onEvent }),
@@ -332,16 +331,33 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
     });
   }
   const deepCrawlResults = await Promise.allSettled(
-    valuableArticles.map((article) => crawleeCrawler.crawlFromArticle({ article, onEvent }))
+    valuableArticles.map((article) => brainMesh.ask({
+      from: 'brain.research.source',
+      to: ['brain.research.source'],
+      op: 'crawler.crawl',
+      ctx: { userId },
+      body: {
+        urls: [article.link],
+        queries: [article.title || ''].filter(Boolean),
+        maxRequests: 24,
+        maxWaves: 4,
+        minContinuationScore: 1.85,
+        maxRuntimeMs: 90 * 1000,
+      },
+    }, { timeoutMs: 100_000 }).then((askResult) => {
+      const body = askResult.replies?.find((reply) => reply.kind === 'reply')?.body || {};
+      for (const event of body.events || []) onEvent(event);
+      return body;
+    }))
   );
   learned.entityLeads = learned.entityLeads || [];
   learned.entityLeads.push(...(news.entityLeads || []));
   for (const result of deepCrawlResults) {
     if (result.status !== 'fulfilled') continue;
     learned.observations.push(
-      ...result.value.pages.map((page) => ({ title: page.title, excerpt: page.excerpt, url: page.url }))
+      ...(result.value.pages || []).map((page) => ({ title: page.title, excerpt: page.excerpt, url: page.url }))
     );
-    learned.entityLeads.push(...result.value.entityLeads);
+    learned.entityLeads.push(...(result.value.entityLeads || []));
   }
 
   const comprehension = await articleComprehension.comprehendArticles({
@@ -366,16 +382,19 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
       queries: comprehension.followUpQueries,
     });
     try {
-      const followUpResult = await crawleeCrawler.crawlAutonomousResearch({
-        queries: comprehension.followUpQueries,
-        maxRequests: 12,
-        maxWaves: 2,
-        onEvent,
-      });
+      const followUpAsk = await brainMesh.ask({
+        from: 'brain.research.source',
+        to: ['brain.research.source'],
+        op: 'crawler.search',
+        ctx: { userId },
+        body: { queries: comprehension.followUpQueries, maxRequests: 12, maxWaves: 2 },
+      }, { timeoutMs: 45_000 });
+      const followUpResult = followUpAsk.replies?.find((reply) => reply.kind === 'reply')?.body || {};
+      for (const event of followUpResult.events || []) onEvent(event);
       learned.observations.push(
-        ...followUpResult.pages.map((page) => ({ title: page.title, excerpt: page.excerpt, url: page.url }))
+        ...(followUpResult.pages || []).map((page) => ({ title: page.title, excerpt: page.excerpt, url: page.url }))
       );
-      learned.entityLeads.push(...followUpResult.entityLeads);
+      learned.entityLeads.push(...(followUpResult.entityLeads || []));
     } catch (error) {
       logger.warn('Follow-up crawl from article comprehension failed', { error: error.message });
     }
@@ -397,16 +416,19 @@ async function runAutonomousResearch({ userId, watchlist = DEFAULT_UNIVERSE, res
       queries: reasonedQuestions.questions,
     });
     try {
-      const reasonedResult = await crawleeCrawler.crawlAutonomousResearch({
-        queries: reasonedQuestions.questions,
-        maxRequests: 14,
-        maxWaves: 2,
-        onEvent,
-      });
+      const reasonedAsk = await brainMesh.ask({
+        from: 'brain.research.source',
+        to: ['brain.research.source'],
+        op: 'crawler.search',
+        ctx: { userId },
+        body: { queries: reasonedQuestions.questions, maxRequests: 14, maxWaves: 2 },
+      }, { timeoutMs: 45_000 });
+      const reasonedResult = reasonedAsk.replies?.find((reply) => reply.kind === 'reply')?.body || {};
+      for (const event of reasonedResult.events || []) onEvent(event);
       learned.observations.push(
-        ...reasonedResult.pages.map((page) => ({ title: page.title, excerpt: page.excerpt, url: page.url }))
+        ...(reasonedResult.pages || []).map((page) => ({ title: page.title, excerpt: page.excerpt, url: page.url }))
       );
-      learned.entityLeads.push(...reasonedResult.entityLeads);
+      learned.entityLeads.push(...(reasonedResult.entityLeads || []));
     } catch (error) {
       logger.warn('Follow-up crawl from LLM-reasoned questions failed', { error: error.message });
     }
@@ -975,12 +997,17 @@ async function collectQuotes(symbols, { userId, onEvent }) {
   return quotes;
 }
 
-async function collectNews(onEvent) {
+async function collectNews(onEvent, { userId } = {}) {
   const [rssSettled, gdeltResult] = await Promise.all([
     Promise.allSettled(
       NEWS_FEEDS.map(async (feed) => {
-        const text = await fetchText(feed.url, 7000);
-        return { feed, items: parseRssItems(text, feed).slice(0, 8) };
+        try {
+          const text = await fetchText(feed.url, 7000);
+          return { feed, items: parseRssItems(text, feed).slice(0, 8) };
+        } catch (error) {
+          error.feed = feed;
+          throw error;
+        }
       })
     ),
     gdeltDoc.collectGdeltResearch({ onEvent }),
@@ -997,6 +1024,20 @@ async function collectNews(onEvent) {
       emit(onEvent, 'news', 18, 'warn', 'News source unavailable; continuing with remaining feeds.', {
         error: result.reason.message,
       });
+      const fallback = await crawlNewsFeedFallback(result.reason.feed, { userId });
+      if (fallback.items.length) {
+        sources.push({ name: result.reason.feed.name, type: 'news-rss-bmcl-fallback', region: result.reason.feed.region, url: result.reason.feed.url });
+        items.push(...fallback.items);
+        emit(onEvent, 'news', 19, 'info', 'Recovered news source via BMCL crawl fallback.', {
+          feed: result.reason.feed.name,
+          articles: fallback.items.length,
+        });
+      } else if (fallback.reason) {
+        emit(onEvent, 'news', 19, 'debug', 'BMCL crawl fallback did not recover the news source.', {
+          feed: result.reason.feed.name,
+          reason: fallback.reason,
+        });
+      }
     }
   }
   if (gdeltResult?.articles?.length) {
@@ -1016,6 +1057,36 @@ async function collectNews(onEvent) {
     entityLeads,
     gdelt: gdeltResult,
   };
+}
+
+async function crawlNewsFeedFallback(feed, { userId } = {}) {
+  if (!feed?.url) return { items: [], reason: 'No feed URL to fall back on.' };
+  try {
+    const result = await brainMesh.ask({
+      from: 'brain.research.source',
+      to: ['brain.research.source'],
+      op: 'crawler.crawl',
+      ctx: { userId },
+      body: { urls: [feed.url] },
+    }, { timeoutMs: 15000 });
+    const reply = result.replies.find((item) => item.kind === 'reply')?.body;
+    if (!reply?.ok || !reply.pages?.length) {
+      return { items: [], reason: reply?.reason || 'BMCL crawl fallback returned no pages.' };
+    }
+    const items = reply.pages
+      .filter((page) => page.excerpt || page.title)
+      .map((page) => ({
+        source: feed.name,
+        region: feed.region,
+        title: page.title || feed.name,
+        link: page.url,
+        publishedAt: null,
+        description: String(page.excerpt || '').slice(0, 280),
+      }));
+    return { items, reason: items.length ? null : 'BMCL crawl fallback pages had no usable content.' };
+  } catch (error) {
+    return { items: [], reason: error.message };
+  }
 }
 
 async function collectMacroData(onEvent) {
@@ -2696,6 +2767,7 @@ module.exports = {
   buildPrePlan,
   scoreCandidates,
   collectQuotes,
+  collectNews,
   NEWS_FEEDS,
   selectValuableArticles,
   listRecentWatcherSignals,

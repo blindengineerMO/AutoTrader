@@ -1,4 +1,4 @@
-const crawleeResearchCrawler = require('./crawleeResearchCrawlerService');
+const brainMesh = require('./brainMeshService');
 const semanticResearchMemory = require('./semanticResearchMemoryService');
 const researchSourceRepo = require('../db/repositories/researchSourceRepo');
 const companyLocationProfileRepo = require('../db/repositories/companyLocationProfileRepo');
@@ -72,16 +72,30 @@ async function researchCompanyLocations({ userId, candidates = [], news = { item
     semanticSeeds: semanticSeeds.length,
   });
 
-  const crawl = await crawleeResearchCrawler.crawlAutonomousResearch({
-    queries,
-    seedSources: semanticSeeds,
-    onEvent,
-    maxFollowUps: 8,
-    maxRequests: 64,
-    minContinuationScore: 1.55,
-    maxWaves: 4,
-    maxSearchExpansions: 16,
-    maxRuntimeMs: 3 * 60 * 1000,
+  const locationMaxRuntimeMs = 3 * 60 * 1000;
+  // No semantic seed URLs yet (e.g. a fresh user) means this is pure query-driven
+  // discovery, which crawler.crawl rejects outright since it requires seed URLs.
+  const op = semanticSeeds.length ? 'crawler.crawl' : 'crawler.search';
+  const crawl = await brainMesh.ask({
+    from: 'brain.research.source',
+    to: ['brain.research.source'],
+    op,
+    ctx: { userId },
+    body: {
+      full: true,
+      urls: semanticSeeds.map((source) => source.url),
+      queries,
+      maxFollowUps: 8,
+      maxRequests: 64,
+      minContinuationScore: 1.55,
+      maxWaves: 4,
+      maxSearchExpansions: 16,
+      maxRuntimeMs: locationMaxRuntimeMs,
+    },
+  }, { timeoutMs: locationMaxRuntimeMs + 60_000 }).then((askResult) => {
+    const body = askResult.replies?.find((reply) => reply.kind === 'reply')?.body || {};
+    for (const event of body.events || []) onEvent(event);
+    return body;
   }).catch((error) => {
     emit(onEvent, 'location-intel', 59, 'warn', 'Company location crawl was unavailable; using current research text only.', {
       error: error.message,
@@ -206,11 +220,11 @@ function persistLocationCrawl({ userId, crawl }) {
       url: page.url,
       title: page.title,
       sourceType: 'learned',
-      discoveryMethod: page.userData?.type || 'company-location-crawl',
-      discoveredFromUrl: page.userData?.discoveredFromUrl,
-      tags: ['location-intel', ...page.score.tags].slice(0, 10),
-      relevanceScore: Math.min(92, 48 + page.score.relevance * 6),
-      credibilityScore: page.userData?.source?.credibility_score || 50,
+      discoveryMethod: page.sourceType || 'company-location-crawl',
+      discoveredFromUrl: page.discoveredFromUrl,
+      tags: ['location-intel', ...(page.tags || [])].slice(0, 10),
+      relevanceScore: Math.min(92, 48 + page.relevance * 6),
+      credibilityScore: page.sourceCredibilityScore || 50,
     });
     researchSourceRepo.recordObservation({
       userId,
@@ -221,10 +235,10 @@ function persistLocationCrawl({ userId, crawl }) {
       excerpt: page.excerpt,
       links: page.links,
       score: {
-        relevance: page.score.relevance,
+        relevance: page.relevance,
         credibility: source?.credibility_score || 50,
-        tags: ['location-intel', ...page.score.tags].slice(0, 10),
-        weightedFinancialEvents: page.score.weightedFinancialEvents,
+        tags: ['location-intel', ...(page.tags || [])].slice(0, 10),
+        weightedFinancialEvents: page.weightedFinancialEvents,
         crawler: 'crawlee-cheerio',
       },
     });

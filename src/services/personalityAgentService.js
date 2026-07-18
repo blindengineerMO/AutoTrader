@@ -11,6 +11,10 @@ const agentWorkspace = require('./agentWorkspaceService');
 const agentResearch = require('./agentResearchService');
 const agentDecisionTree = require('./agentDecisionTreeService');
 const agentAffinityRepo = require('../db/repositories/agentAffinityRepo');
+const agentRecommendationOutcomeRepo = require('../db/repositories/agentRecommendationOutcomeRepo');
+const eventOutcomeLabeling = require('./eventOutcomeLabelingService');
+const agentConsensusSizingRepo = require('../db/repositories/agentConsensusSizingRepo');
+const agentReviewQueueRepo = require('../db/repositories/agentReviewQueueRepo');
 
 const MODERATOR_BRAIN_ID = 'agent.council.moderator';
 const OLLAMA_BRAIN_ID = 'brain.llm.ollama';
@@ -303,7 +307,8 @@ async function runCouncil({ userId, snapshotId = null, onEvent = () => {} } = {}
   const signals = snapshot?.signals || [];
   const accountState = brokerAccountRepo.ensureDefault(userId);
   const positions = positionRepo.listByUser(userId);
-  const decisionContext = { snapshot, signals, positions, accountState };
+  const investingMode = settingsRepo.get(userId)?.investing_mode || 'balanced';
+  const decisionContext = { snapshot, signals, positions, accountState, investingMode };
   const conversation = brainMesh.startConversation({
     userId,
     topic: `agent-council${snapshot?.id ? `:${snapshot.id}` : ''}`,
@@ -393,6 +398,30 @@ async function runCouncil({ userId, snapshotId = null, onEvent = () => {} } = {}
   for (const recommendation of allRecommendations) {
     const agent = agents.find((item) => item.id === recommendation.agentId);
     if (agent) agentWorkspace.recordRecommendation(agent, recommendation, run);
+  }
+  agentRecommendationOutcomeRepo.createForRecommendations(userId, run.id, run.recommendations, {
+    resolveSectorSymbol: eventOutcomeLabeling.resolveSectorProxy,
+  });
+  for (const rec of consensus.finalRecommendations) {
+    if (!rec.symbol || !rec.positionSizing) continue;
+    agentConsensusSizingRepo.upsertForSymbol(userId, rec.symbol, {
+      councilRunId: run.id,
+      disagreementFactor: rec.positionSizing.disagreementFactor,
+      meanConviction: rec.positionSizing.meanConviction,
+      convictionStdDev: rec.positionSizing.convictionStdDev,
+      buyVotes: rec.positionSizing.buyVotes,
+      sellVotes: rec.positionSizing.sellVotes,
+    });
+    const reason = reviewQueueReason(rec.positionSizing);
+    if (reason) {
+      agentReviewQueueRepo.create(userId, run.id, rec.symbol, reason, {
+        meanConviction: rec.positionSizing.meanConviction,
+        convictionStdDev: rec.positionSizing.convictionStdDev,
+        disagreementFactor: rec.positionSizing.disagreementFactor,
+        buyVotes: rec.positionSizing.buyVotes,
+        sellVotes: rec.positionSizing.sellVotes,
+      });
+    }
   }
   brainMesh.completeConversation(conversation.id, userId, {
     completedBy: 'agent.council.moderator',
@@ -640,6 +669,7 @@ function buildConsensus(recommendations, agents, challengeOutcomes = new Map()) 
       const buyVotes = item.votes.filter((vote) => vote.action === 'buy' || vote.action === 'buy_more');
       const sellVotes = item.votes.filter((vote) => vote.action === 'sell');
       const avgConviction = Math.round(item.votes.reduce((sum, vote) => sum + vote.conviction, 0) / item.votes.length);
+      const positionSizing = computePositionSizing(item.votes, buyVotes, sellVotes);
       const ownedPosition = item.ownedPosition || null;
       const action = item.score > 90 && buyVotes.length >= 2
         ? ownedPosition ? 'buy_more' : 'buy'
@@ -656,6 +686,7 @@ function buildConsensus(recommendations, agents, challengeOutcomes = new Map()) 
         positionAction: ownedPosition ? normalizeOwnedAction(action) : null,
         consensusScore: Math.round(item.score),
         avgConviction,
+        positionSizing,
         supportingAgents: item.votes.filter((vote) => vote.action === action || (action === 'buy_more' && vote.action === 'buy') || (action === 'hold' && vote.action !== 'sell') || (action === 'watch' && vote.action !== 'sell')).map((vote) => vote.agentName),
         decisionFrameworkVersion: agentDecisionTree.VERSION,
         votes: item.votes,
@@ -985,6 +1016,34 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+// Shrinks a symbol's advisory position size when the council's agents disagree with
+// each other, either on conviction (high stddev) or on direction (split buy/sell votes).
+// disagreementFactor is floored at 0.2 rather than 0 -- a full veto is rulesEngine's job.
+function computePositionSizing(votes, buyVotes, sellVotes) {
+  const convictions = votes.map((vote) => vote.conviction);
+  const meanConviction = convictions.reduce((sum, c) => sum + c, 0) / convictions.length;
+  const variance = convictions.reduce((sum, c) => sum + (c - meanConviction) ** 2, 0) / convictions.length;
+  const convictionStdDev = Math.sqrt(variance);
+  const isSplit = buyVotes.length > 0 && sellVotes.length > 0;
+  const disagreementFactor = clamp(1 - (convictionStdDev / 40) * 0.6 - (isSplit ? 0.25 : 0), 0.2, 1);
+  return {
+    meanConviction: Math.round(meanConviction * 100) / 100,
+    convictionStdDev: Math.round(convictionStdDev * 100) / 100,
+    buyVotes: buyVotes.length,
+    sellVotes: sellVotes.length,
+    isSplit,
+    disagreementFactor: Math.round(disagreementFactor * 10000) / 10000,
+  };
+}
+
+// First matching reason wins; a symbol matching none of these is not queued for review.
+function reviewQueueReason(positionSizing) {
+  if (positionSizing.disagreementFactor < 0.6) return 'high_disagreement';
+  if (positionSizing.isSplit) return 'split_vote';
+  if (positionSizing.meanConviction >= 40 && positionSizing.meanConviction <= 60) return 'low_confidence';
+  return null;
+}
+
 function emit(onEvent, phase, progress, level, message, data) {
   onEvent({ phase, progress, level, message, data });
 }
@@ -1011,4 +1070,5 @@ module.exports = {
   buildDebateRounds,
   listCouncilRuns,
   buildConsensus,
+  computePositionSizing,
 };

@@ -41,7 +41,7 @@ const usDroughtMonitor = require('./usDroughtMonitorService');
 const unhcrRefugees = require('./unhcrRefugeeStatisticsService');
 const nrcNuclearEvents = require('./nrcNuclearEventService');
 const logger = require('../utils/logger');
-const { normalizeLimitedStrings, isPublicHttpUrl, clampNumber } = require('../shared/crawlGuard');
+const { normalizeLimitedStrings, isPublicHttpUrl, clampNumber, clampFloat } = require('../shared/crawlGuard');
 
 const PROTOCOL = 'BMCL/1.0';
 const SUPPORTED_PROTOCOLS = ['BMCL/1.0', 'BMCL/2.0'];
@@ -1012,42 +1012,62 @@ function registerDefaultAgents() {
 
 async function handleCrawlerSearch(envelope) {
   const body = envelope.body || {};
-  const queries = normalizeLimitedStrings(body.queries || body.query, 4);
-  if (!queries.length) return { ok: false, reason: 'No search query provided.', pages: [], failures: [] };
+  const full = Boolean(body.full);
+  const queries = normalizeLimitedStrings(body.queries || body.query, full ? 150 : 4);
+  if (!queries.length) return { ok: false, reason: 'No search query provided.', mode: 'search', pages: [], failures: [] };
   const events = [];
   const result = await crawleeCrawler.crawlAutonomousResearch({
     queries,
     seedSources: [],
-    maxRequests: clampNumber(body.maxRequests, 4, 36, 16),
-    maxWaves: clampNumber(body.maxWaves, 1, 4, 2),
-    maxFollowUps: clampNumber(body.maxFollowUps, 0, 10, 4),
-    maxSearchExpansions: clampNumber(body.maxSearchExpansions, 0, 16, 8),
-    maxRuntimeMs: clampNumber(body.maxRuntimeMs, 10_000, 120_000, 45_000),
+    maxRequests: full ? clampNumber(body.maxRequests, 4, 300, 96) : clampNumber(body.maxRequests, 4, 36, 16),
+    maxWaves: full ? clampNumber(body.maxWaves, 1, 12, 8) : clampNumber(body.maxWaves, 1, 4, 2),
+    maxFollowUps: full ? clampNumber(body.maxFollowUps, 0, 40, 18) : clampNumber(body.maxFollowUps, 0, 10, 4),
+    maxSearchExpansions: full
+      ? clampNumber(body.maxSearchExpansions, 0, 100, 36)
+      : clampNumber(body.maxSearchExpansions, 0, 16, 8),
+    maxRuntimeMs: full
+      ? clampNumber(body.maxRuntimeMs, 10_000, 600_000, 360_000)
+      : clampNumber(body.maxRuntimeMs, 10_000, 120_000, 45_000),
+    minContinuationScore: clampFloat(body.minContinuationScore, 0.1, 5, 1.85),
     onEvent: (event) => events.push(event),
   });
-  return compactCrawlerResult({ result, events, queries, mode: 'search' });
+  return compactCrawlerResult({ result, events, queries, mode: 'search', full });
 }
 
 async function handleCrawlerCrawl(envelope) {
   const body = envelope.body || {};
-  const urls = normalizeLimitedStrings(body.urls || body.url, 6).filter(isPublicHttpUrl);
+  const full = Boolean(body.full);
+  const urls = normalizeLimitedStrings(body.urls || body.url, full ? 30 : 6).filter(isPublicHttpUrl);
   const seedSources = urls.map((url) => ({ url, title: url, tags: ['bmcl-crawl'] }));
-  if (!seedSources.length) return { ok: false, reason: 'No public HTTP(S) crawl URL provided.', pages: [], failures: [] };
+  if (!seedSources.length) return { ok: false, reason: 'No public HTTP(S) crawl URL provided.', mode: 'crawl', pages: [], failures: [] };
   const events = [];
   const result = await crawleeCrawler.crawlAutonomousResearch({
-    queries: normalizeLimitedStrings(body.queries || body.query, 2),
+    queries: normalizeLimitedStrings(body.queries || body.query, full ? 150 : 2),
     seedSources,
-    maxRequests: clampNumber(body.maxRequests, seedSources.length, 36, Math.max(seedSources.length, 12)),
-    maxWaves: clampNumber(body.maxWaves, 1, 4, 2),
-    maxFollowUps: clampNumber(body.maxFollowUps, 0, 10, 4),
-    maxSearchExpansions: clampNumber(body.maxSearchExpansions, 0, 12, 4),
-    maxRuntimeMs: clampNumber(body.maxRuntimeMs, 10_000, 120_000, 45_000),
+    maxRequests: full
+      ? clampNumber(body.maxRequests, seedSources.length, 300, Math.max(seedSources.length, 96))
+      : clampNumber(body.maxRequests, seedSources.length, 36, Math.max(seedSources.length, 12)),
+    maxWaves: full ? clampNumber(body.maxWaves, 1, 12, 8) : clampNumber(body.maxWaves, 1, 4, 2),
+    maxFollowUps: full ? clampNumber(body.maxFollowUps, 0, 40, 18) : clampNumber(body.maxFollowUps, 0, 10, 4),
+    maxSearchExpansions: full
+      ? clampNumber(body.maxSearchExpansions, 0, 60, 36)
+      : clampNumber(body.maxSearchExpansions, 0, 12, 4),
+    maxRuntimeMs: full
+      ? clampNumber(body.maxRuntimeMs, 10_000, 600_000, 360_000)
+      : clampNumber(body.maxRuntimeMs, 10_000, 120_000, 45_000),
+    minContinuationScore: clampFloat(body.minContinuationScore, 0.1, 5, 1.85),
     onEvent: (event) => events.push(event),
   });
-  return compactCrawlerResult({ result, events, queries: seedSources.map((source) => source.url), mode: 'crawl' });
+  return compactCrawlerResult({ result, events, queries: seedSources.map((source) => source.url), mode: 'crawl', full });
 }
 
-function compactCrawlerResult({ result, events, queries, mode }) {
+// `full` bypasses truncation for trusted/internal callers that need the rich
+// result shape (fullText, links, all discovered/entityLeads) — default/compact
+// mode stays the small payload that lighter BMCL callers expect.
+function compactCrawlerResult({ result, events, queries, mode, full = false }) {
+  const pageLimit = full ? result.pages.length : 8;
+  const failureLimit = full ? result.failures.length : 8;
+  const entityLeadLimit = full ? result.entityLeads.length : 12;
   return {
     ok: true,
     mode,
@@ -1056,7 +1076,20 @@ function compactCrawlerResult({ result, events, queries, mode }) {
     failureCount: result.failures.length,
     discoveredCount: result.discovered.length,
     entityLeadCount: result.entityLeads.length,
-    pages: result.pages.slice(0, 8).map((page) => ({
+    pages: result.pages.slice(0, pageLimit).map((page) => (full ? {
+      url: page.url,
+      title: page.title,
+      excerpt: page.excerpt,
+      fullText: page.fullText,
+      links: page.links,
+      relevance: page.score?.relevance,
+      weightedFinancialEvents: page.score?.weightedFinancialEvents,
+      tags: page.score?.tags || [],
+      sourceType: page.userData?.type,
+      searchProvider: page.userData?.searchProvider,
+      discoveredFromUrl: page.userData?.discoveredFromUrl,
+      sourceCredibilityScore: page.userData?.source?.credibility_score,
+    } : {
       url: page.url,
       title: page.title,
       excerpt: page.excerpt,
@@ -1065,7 +1098,12 @@ function compactCrawlerResult({ result, events, queries, mode }) {
       sourceType: page.userData?.type,
       searchProvider: page.userData?.searchProvider,
     })),
-    failures: result.failures.slice(0, 8).map((failure) => ({
+    failures: result.failures.slice(0, failureLimit).map((failure) => (full ? {
+      url: failure.url,
+      title: failure.title,
+      error: failure.error,
+      userData: failure.userData,
+    } : {
       url: failure.url,
       error: failure.error,
       searchProvider: failure.userData?.searchProvider,
@@ -1074,9 +1112,10 @@ function compactCrawlerResult({ result, events, queries, mode }) {
     providerFallbacks: events
       .filter((event) => event.phase === 'crawlee-search-fallback')
       .flatMap((event) => event.data?.fallbackRequests || [])
-      .slice(0, 12),
-    entityLeads: result.entityLeads.slice(0, 12),
-    events: events.slice(-16),
+      .slice(0, full ? undefined : 12),
+    discovered: full ? result.discovered : undefined,
+    entityLeads: result.entityLeads.slice(0, entityLeadLimit),
+    events: events.slice(full ? -64 : -16),
   };
 }
 

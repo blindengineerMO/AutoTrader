@@ -8,11 +8,20 @@ Standalone BrainMesh (BMCL/2.0) compute node. Run this on your own Linux server 
 npm install
 ```
 
-Create `~/.autotrader-node/config.json`:
+Create `~/.autotrader-node/config.json`. For a coordinator reachable over the public internet, use `wss://` on 443 behind TLS termination:
 
 ```json
 {
   "coordinatorUrl": "wss://your-coordinator.example.com/api/brain-mesh/nodes/socket",
+  "joinToken": "the-one-time-token-from-the-dashboard"
+}
+```
+
+For a node on the same private network as the coordinator, plain `ws://` against the coordinator's internal port (3000 by default) works the same way — the client and server don't require TLS or port 443, that's just the recommended setup for anything crossing an untrusted network:
+
+```json
+{
+  "coordinatorUrl": "ws://coordinator.internal:3000/api/brain-mesh/nodes/socket",
   "joinToken": "the-one-time-token-from-the-dashboard"
 }
 ```
@@ -29,4 +38,4 @@ On first run, an Ed25519 identity keypair is generated at `~/.autotrader-node/id
 
 ## What this node can and cannot do
 
-This node only ever serves compute/research ops (currently scraping via `crawler.crawl`). The coordinator enforces — independent of anything this client claims — that order-placement, trading, broker, and rules-engine operations can never be dispatched to a remote node.
+This node only ever serves compute/research ops — the full discovery-crawl engine, advertised as `crawler.crawl` (fetch/deep-crawl a set of URLs) and `crawler.search` (broad search-provider discovery). The coordinator enforces — independent of anything this client claims — that order-placement, trading, broker, and rules-engine operations can never be dispatched to a remote node.

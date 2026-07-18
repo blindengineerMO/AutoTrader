@@ -72,6 +72,53 @@ describe('alpacaAssetClient', () => {
     });
   });
 
+  it('cross-checks the bulk active-asset list before excluding a symbol whose single-asset lookup 404s', async () => {
+    const userId = newUser();
+    const notFoundError = Object.assign(new Error('asset not found'), { statusCode: 404 });
+    alpacaAssetClient.__setClientFactoryForTests(() => ({
+      getAsset: async () => { throw notFoundError; },
+      getAssets: async () => [
+        { symbol: 'GOOD', name: 'Genuinely Tradable Co', status: 'active', tradable: true, exchange: 'NASDAQ' },
+      ],
+    }));
+
+    const result = await alpacaAssetClient.evaluateSymbol('GOOD', { userId, companyName: 'Genuinely Tradable Co' });
+
+    expect(result.eligible).toBe(true);
+    expect(settingsRepo.getExcludedSymbols(userId)).toHaveLength(0);
+  });
+
+  it('still excludes a symbol that 404s on single-asset lookup and is absent from the bulk active list', async () => {
+    const userId = newUser();
+    const notFoundError = Object.assign(new Error('asset not found'), { statusCode: 404 });
+    alpacaAssetClient.__setClientFactoryForTests(() => ({
+      getAsset: async () => { throw notFoundError; },
+      getAssets: async () => [
+        { symbol: 'OTHER', name: 'Some Other Co', status: 'active', tradable: true, exchange: 'NASDAQ' },
+      ],
+    }));
+
+    const result = await alpacaAssetClient.evaluateSymbol('MISSING', { userId, companyName: 'Missing Co' });
+
+    expect(result.eligible).toBe(false);
+    expect(settingsRepo.getExcludedSymbols(userId)[0]).toMatchObject({ symbol: 'MISSING' });
+  });
+
+  it('does not treat a non-404 error whose message happens to mention "not found" or "404" as a confirmed-missing asset', async () => {
+    const userId = newUser();
+    const rateLimitError = Object.assign(new Error('rate limited, retry after 404ms'), { statusCode: 429 });
+    alpacaAssetClient.__setClientFactoryForTests(() => ({
+      getAsset: async () => { throw rateLimitError; },
+    }));
+
+    const result = await alpacaAssetClient.evaluateSymbol('RATE', { userId, companyName: 'Rate Limited Co' });
+
+    // Treated as a degraded/unknown lookup (permissive), not excluded outright.
+    expect(result.eligible).toBe(true);
+    expect(result.degraded).toBe(true);
+    expect(settingsRepo.getExcludedSymbols(userId)).toHaveLength(0);
+  });
+
   it('uses Alpaca active assets to map company-name leads before Finnhub', async () => {
     const userId = newUser();
     alpacaAssetClient.__setClientFactoryForTests(() => ({

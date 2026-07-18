@@ -35,6 +35,25 @@ const decisionReportRepo = require('../src/db/repositories/decisionReportRepo');
 const MockBrokerClient = require('../src/services/broker/MockBrokerClient');
 const rulesEngine = require('../src/services/rulesEngine');
 const { runTradingCycle } = require('../src/services/tradingCycle');
+const agentConsensusSizingRepo = require('../src/db/repositories/agentConsensusSizingRepo');
+const tradingAgentRepo = require('../src/db/repositories/tradingAgentRepo');
+const db = require('../src/db/connection');
+
+function seedFreshSizing(userId, symbol, disagreementFactor, { staleHoursAgo } = {}) {
+  const run = tradingAgentRepo.createCouncilRun({ userId, summary: {}, recommendations: [] });
+  agentConsensusSizingRepo.upsertForSymbol(userId, symbol, {
+    councilRunId: run.id,
+    disagreementFactor,
+    meanConviction: 50,
+    convictionStdDev: 20,
+    buyVotes: 1,
+    sellVotes: 1,
+  });
+  if (staleHoursAgo) {
+    db.prepare("UPDATE agent_consensus_sizing SET computed_at = datetime('now', ?) WHERE user_id = ? AND symbol = ?")
+      .run(`-${staleHoursAgo} hours`, userId, symbol);
+  }
+}
 
 // research_snapshot_id is a real FK on trading_plans, so the stub must
 // actually persist a snapshot rather than fabricating an id.
@@ -106,6 +125,92 @@ describe('runTradingCycle (mocked research + AI + broker)', () => {
 
     const accountState = await broker.getAccountState();
     expect(accountState.cashUsd).toBe(0); // 100 cash - 1 * $100 fill price
+  });
+
+  it('scales a buy quantity down by the council disagreement factor when council_sizing_enabled is on', async () => {
+    const sizingUser = userRepo.createUser({
+      email: `cycle-sizing-on-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 1000,
+      maxTradesPerSymbolPer24h: 3,
+    });
+    settingsRepo.update(sizingUser.id, { tradingEnabled: 1, councilSizingEnabled: 1, maxBuyOrderNotionalUsd: 100000 });
+    seedFreshSizing(sizingUser.id, 'NVDA', 0.4);
+
+    const broker = new MockBrokerClient({ startingCashUsd: 100000 });
+    const plan = await runTradingCycle({
+      userId: sizingUser.id,
+      broker,
+      runResearchCycle: stubRunResearchCycleFactory,
+      generatePlan: async () => ({
+        modelUsed: 'stub:test-model',
+        raw: { actions: [{ symbol: 'NVDA', action: 'buy', quantity: 5, rationale: 'strong momentum' }], overallRationale: 'test' },
+      }),
+      executionMode: 'live',
+    });
+
+    const buyAction = plan.actions.find((a) => a.symbol === 'NVDA');
+    expect(buyAction.status).toBe('executed');
+    // floor(5 * 0.4) = 2, not the AI plan's original 5.
+    const orders = orderRepo.listByUser(sizingUser.id, 10);
+    expect(orders[0].quantity).toBe(2);
+  });
+
+  it('leaves quantity untouched when council_sizing_enabled is off, even with a fresh disagreement reading', async () => {
+    const offUser = userRepo.createUser({
+      email: `cycle-sizing-off-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 1000,
+      maxTradesPerSymbolPer24h: 3,
+    });
+    settingsRepo.update(offUser.id, { tradingEnabled: 1, maxBuyOrderNotionalUsd: 100000 });
+    seedFreshSizing(offUser.id, 'NVDA', 0.4);
+
+    const broker = new MockBrokerClient({ startingCashUsd: 100000 });
+    const plan = await runTradingCycle({
+      userId: offUser.id,
+      broker,
+      runResearchCycle: stubRunResearchCycleFactory,
+      generatePlan: async () => ({
+        modelUsed: 'stub:test-model',
+        raw: { actions: [{ symbol: 'NVDA', action: 'buy', quantity: 5, rationale: 'strong momentum' }], overallRationale: 'test' },
+      }),
+      executionMode: 'live',
+    });
+
+    const buyAction = plan.actions.find((a) => a.symbol === 'NVDA');
+    expect(buyAction.status).toBe('executed');
+    const orders = orderRepo.listByUser(offUser.id, 10);
+    expect(orders[0].quantity).toBe(5);
+  });
+
+  it('ignores a stale disagreement reading and blocks the order when scaling would zero out the quantity', async () => {
+    const staleUser = userRepo.createUser({
+      email: `cycle-sizing-stale-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 1000,
+      maxTradesPerSymbolPer24h: 3,
+    });
+    settingsRepo.update(staleUser.id, { tradingEnabled: 1, councilSizingEnabled: 1, maxBuyOrderNotionalUsd: 100000 });
+    seedFreshSizing(staleUser.id, 'NVDA', 0.4, { staleHoursAgo: 72 });
+
+    const broker = new MockBrokerClient({ startingCashUsd: 100000 });
+    const plan = await runTradingCycle({
+      userId: staleUser.id,
+      broker,
+      runResearchCycle: stubRunResearchCycleFactory,
+      generatePlan: async () => ({
+        modelUsed: 'stub:test-model',
+        raw: { actions: [{ symbol: 'NVDA', action: 'buy', quantity: 5, rationale: 'strong momentum' }], overallRationale: 'test' },
+      }),
+      executionMode: 'live',
+    });
+
+    // Stale (>48h) reading is ignored, so scaling never applies and the full quantity executes.
+    const buyAction = plan.actions.find((a) => a.symbol === 'NVDA');
+    expect(buyAction.status).toBe('executed');
+    const orders = orderRepo.listByUser(staleUser.id, 10);
+    expect(orders[0].quantity).toBe(5);
   });
 
   it('blocks further buys on the same symbol once the per-symbol 24h limit is hit', async () => {

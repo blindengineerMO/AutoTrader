@@ -20,6 +20,8 @@ const settingsRepo = require('../src/db/repositories/settingsRepo');
 const brokerAccountRepo = require('../src/db/repositories/brokerAccountRepo');
 const positionRepo = require('../src/db/repositories/positionRepo');
 const agentAffinityRepo = require('../src/db/repositories/agentAffinityRepo');
+const agentRecommendationOutcomeRepo = require('../src/db/repositories/agentRecommendationOutcomeRepo');
+const db = require('../src/db/connection');
 const personalityAgents = require('../src/services/personalityAgentService');
 const brainMesh = require('../src/services/brainMeshService');
 const aiClient = require('../src/services/strategy/aiClient');
@@ -104,10 +106,53 @@ describe('personalityAgentService', () => {
       'portfolio-fit',
       'sell-decision-tree',
     ]));
+    expect(run.recommendations[0].evidence.decisionTree.mandate.investingMode).toBe('balanced');
+
+    const outcomeRows = db.prepare('SELECT * FROM agent_recommendation_outcomes WHERE council_run_id = ?').all(run.id);
+    expect(outcomeRows.length).toBe(run.recommendations.length);
+    expect(outcomeRows.every((row) => row.outcome_backfilled_at === null)).toBe(true);
+    const nvdaRow = outcomeRows.find((row) => row.symbol === 'NVDA');
+    expect(nvdaRow.baseline_price).toBe(100);
+    expect(nvdaRow.conviction).toBeGreaterThanOrEqual(0);
+
+    const sizingRows = db.prepare('SELECT * FROM agent_consensus_sizing WHERE council_run_id = ?').all(run.id);
+    expect(sizingRows.length).toBeGreaterThan(0);
+    expect(sizingRows.every((row) => row.disagreement_factor >= 0.2 && row.disagreement_factor <= 1)).toBe(true);
 
     const deleted = personalityAgents.deleteAgent(user.id, custom.id);
     expect(deleted.status).toBe('deleted');
     expect(personalityAgents.listAgents(user.id).some((agent) => agent.id === custom.id)).toBe(false);
+  });
+
+  it('flows the user investing_mode setting into the decision tree mandate used by the council', async () => {
+    const user = userRepo.createUser({
+      email: `investing-mode-council-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+    researchRepo.create({
+      userId: user.id,
+      source: 'test',
+      summary: { prePlan: { thesis: 'test' } },
+      signals: [
+        { symbol: 'NVDA', localAiScore: 82, changePct: 2.4, volatilityPct: 2.1, theme: 'semiconductors+ai', price: 100 },
+      ],
+    });
+    personalityAgents.ensureDefaultAgents(user.id);
+
+    settingsRepo.update(user.id, { investingMode: 'aggressive' });
+    const aggressiveRun = await personalityAgents.runCouncil({ userId: user.id });
+    const aggressiveMandate = aggressiveRun.recommendations[0]?.evidence.decisionTree.mandate;
+    expect(aggressiveMandate.investingMode).toBe('aggressive');
+
+    settingsRepo.update(user.id, { investingMode: 'conservative' });
+    const conservativeRun = await personalityAgents.runCouncil({ userId: user.id });
+    const conservativeMandate = conservativeRun.recommendations[0]?.evidence.decisionTree.mandate;
+    expect(conservativeMandate.investingMode).toBe('conservative');
+
+    expect(aggressiveMandate.maximumPositionWeight).toBeGreaterThan(conservativeMandate.maximumPositionWeight);
+    expect(aggressiveMandate.requiredMarginOfSafety).toBeLessThan(conservativeMandate.requiredMarginOfSafety);
   });
 
   it('shares the same personality BrainMesh agent across users while keeping user-scoped records', () => {
@@ -161,6 +206,29 @@ describe('personalityAgentService', () => {
 
     expect(nvdaChallenged.consensusScore).toBeLessThan(msftChallenged.consensusScore);
     expect(nvdaChallenged.consensusScore).toBeLessThan(nvdaBaseline.consensusScore);
+  });
+
+  it('buildConsensus shrinks positionSizing.disagreementFactor for a split buy/sell vote vs. a unanimous one', () => {
+    const agents = [
+      { id: 'agent-a', name: 'Agent A', model: { learningWeight: 1 } },
+      { id: 'agent-b', name: 'Agent B', model: { learningWeight: 1 } },
+    ];
+    const recommendations = [
+      { agentId: 'agent-a', symbol: 'NVDA', action: 'buy', conviction: 80, rationale: 'bullish' },
+      { agentId: 'agent-b', symbol: 'NVDA', action: 'sell', conviction: 80, rationale: 'bearish' },
+      { agentId: 'agent-a', symbol: 'MSFT', action: 'buy', conviction: 80, rationale: 'bullish' },
+      { agentId: 'agent-b', symbol: 'MSFT', action: 'buy', conviction: 80, rationale: 'bullish' },
+    ];
+
+    const consensus = personalityAgents.buildConsensus(recommendations, agents);
+    const nvda = consensus.finalRecommendations.find((rec) => rec.symbol === 'NVDA');
+    const msft = consensus.finalRecommendations.find((rec) => rec.symbol === 'MSFT');
+
+    expect(nvda.positionSizing.isSplit).toBe(true);
+    expect(msft.positionSizing.isSplit).toBe(false);
+    expect(nvda.positionSizing.disagreementFactor).toBeLessThan(msft.positionSizing.disagreementFactor);
+    expect(msft.positionSizing.disagreementFactor).toBe(1);
+    expect(nvda.positionSizing.disagreementFactor).toBeGreaterThanOrEqual(0.2);
   });
 
   it('buildDebateRounds prefers the highest-affinity challenger for the topic, and skips a proven low-value pairing', () => {

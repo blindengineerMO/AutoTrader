@@ -1,6 +1,7 @@
 const researchSourceRepo = require('../db/repositories/researchSourceRepo');
 const settingsRepo = require('../db/repositories/settingsRepo');
 const crawleeResearchCrawler = require('./crawleeResearchCrawlerService');
+const brainMesh = require('./brainMeshService');
 const semanticResearchMemory = require('./semanticResearchMemoryService');
 const {
   SPEC_DISCOVERY_QUERIES,
@@ -188,17 +189,26 @@ async function runCrawleeResearchDiscovery({ userId, researchRunId, onEvent }) {
       })).slice(0, 6),
     });
   }
-  const crawl = await crawleeResearchCrawler.crawlAutonomousResearch({
-    queries: DISCOVERY_QUERIES,
-    seedSources,
-    onEvent,
-    maxFollowUps: 24,
-    maxRequests: 180,
-    minContinuationScore: 1.75,
-    maxWaves: 10,
-    maxSearchExpansions: 60,
-    maxRuntimeMs: 8 * 60 * 1000,
-  });
+  const maxRuntimeMs = 8 * 60 * 1000;
+  const askResult = await brainMesh.ask({
+    from: 'brain.research.source',
+    to: ['brain.research.source'],
+    op: 'crawler.crawl',
+    ctx: { userId },
+    body: {
+      full: true,
+      urls: seedSources.map((source) => source.url),
+      queries: DISCOVERY_QUERIES,
+      maxFollowUps: 24,
+      maxRequests: 180,
+      minContinuationScore: 1.75,
+      maxWaves: 10,
+      maxSearchExpansions: 60,
+      maxRuntimeMs,
+    },
+  }, { timeoutMs: maxRuntimeMs + 60_000 });
+  const crawl = askResult.replies?.find((reply) => reply.kind === 'reply')?.body || {};
+  for (const event of crawl.events || []) onEvent(event);
 
   const observations = [];
   for (const failure of crawl.failures || []) {
@@ -229,7 +239,7 @@ async function runCrawleeResearchDiscovery({ userId, researchRunId, onEvent }) {
     });
   }
 
-  for (const link of crawl.discovered) {
+  for (const link of crawl.discovered || []) {
     researchSourceRepo.upsert({
       userId,
       url: link.url,
@@ -243,17 +253,17 @@ async function runCrawleeResearchDiscovery({ userId, researchRunId, onEvent }) {
     });
   }
 
-  for (const page of crawl.pages) {
+  for (const page of crawl.pages || []) {
     const source = researchSourceRepo.upsert({
       userId,
       url: page.url,
       title: page.title,
-      sourceType: isSearchRequestType(page.userData?.type) ? 'search' : 'learned',
-      discoveryMethod: page.userData?.type || 'crawlee-crawl',
-      discoveredFromUrl: page.userData?.discoveredFromUrl,
-      tags: page.score.tags,
-      relevanceScore: Math.min(90, 40 + page.score.relevance * 6),
-      credibilityScore: page.userData?.source?.credibility_score || 50,
+      sourceType: isSearchRequestType(page.sourceType) ? 'search' : 'learned',
+      discoveryMethod: page.sourceType || 'crawlee-crawl',
+      discoveredFromUrl: page.discoveredFromUrl,
+      tags: page.tags,
+      relevanceScore: Math.min(90, 40 + page.relevance * 6),
+      credibilityScore: page.sourceCredibilityScore || 50,
     });
     researchSourceRepo.recordObservation({
       userId,
@@ -264,10 +274,10 @@ async function runCrawleeResearchDiscovery({ userId, researchRunId, onEvent }) {
       excerpt: page.excerpt,
       links: page.links,
       score: {
-        relevance: page.score.relevance,
+        relevance: page.relevance,
         credibility: source?.credibility_score || 50,
-        tags: page.score.tags,
-        weightedFinancialEvents: page.score.weightedFinancialEvents,
+        tags: page.tags,
+        weightedFinancialEvents: page.weightedFinancialEvents,
         crawler: 'crawlee-cheerio',
       },
     });
@@ -280,16 +290,16 @@ async function runCrawleeResearchDiscovery({ userId, researchRunId, onEvent }) {
       excerpt: page.excerpt,
       links: page.links,
       score: {
-        relevance: page.score.relevance,
+        relevance: page.relevance,
         credibility: source?.credibility_score || 50,
-        tags: page.score.tags,
-        weightedFinancialEvents: page.score.weightedFinancialEvents,
+        tags: page.tags,
+        weightedFinancialEvents: page.weightedFinancialEvents,
         crawler: 'crawlee-cheerio',
       },
     });
   }
 
-  return { observations, discovered: crawl.discovered, entityLeads: crawl.entityLeads || [] };
+  return { observations, discovered: crawl.discovered || [], entityLeads: crawl.entityLeads || [] };
 }
 
 async function discoverSources(userId, onEvent) {

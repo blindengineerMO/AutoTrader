@@ -194,4 +194,65 @@ describe('brainMeshNodeTransport integration', () => {
     registerSpy.mockRestore();
     socket.close();
   });
+
+  it('persists health telemetry from node.hello and refreshes it on node.heartbeat', async () => {
+    const userId = newUser();
+    const joinToken = nodeRepo.createJoinToken({ userId, label: 'health-node' });
+    const identity = generateIdentity();
+
+    const socket = new WebSocket(wsUrl(ctx.server));
+    await once(socket, 'node.challenge');
+    socket.send(JSON.stringify({
+      kind: 'node.hello',
+      body: {
+        publicKey: identity.publicKeyPem,
+        joinToken: joinToken.token,
+        capabilities: [],
+        resources: { cpuCores: 8, ollamaModels: ['llama3'] },
+        health: {
+          cpuCores: 8,
+          cpuPercent: 12,
+          ram: { totalMb: 16000, usedMb: 4000, percent: 25 },
+          uptimeSec: 120,
+          features: ['ollama'],
+          ollamaModels: ['llama3'],
+          collectedAt: new Date().toISOString(),
+        },
+      },
+    }));
+    const ack = await once(socket, 'node.hello.ack');
+    expect(ack.body.ok).toBe(true);
+
+    let [node] = nodeRepo.listNodes(userId);
+    expect(node.metadata.resources).toEqual({ cpuCores: 8, ollamaModels: ['llama3'] });
+    expect(node.metadata.health.cpuPercent).toBe(12);
+    expect(node.metadata.health.ram.percent).toBe(25);
+    expect(node.metadata.health.features).toEqual(['ollama']);
+
+    socket.send(JSON.stringify({
+      kind: 'node.heartbeat',
+      body: {
+        capabilities: [],
+        health: {
+          cpuCores: 8,
+          cpuPercent: 77,
+          ram: { totalMb: 16000, usedMb: 9000, percent: 56 },
+          uptimeSec: 180,
+          features: [],
+          ollamaModels: [],
+          collectedAt: new Date().toISOString(),
+        },
+      },
+    }));
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    [node] = nodeRepo.listNodes(userId);
+    expect(node.metadata.health.cpuPercent).toBe(77);
+    expect(node.metadata.health.ram.percent).toBe(56);
+    // resources from the original hello survive the heartbeat's metadata merge
+    expect(node.metadata.resources).toEqual({ cpuCores: 8, ollamaModels: ['llama3'] });
+
+    socket.close();
+  });
 });

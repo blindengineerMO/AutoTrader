@@ -1387,10 +1387,14 @@ Each node generates a local Ed25519 keypair on first run (`node-client/src/ident
 Handshake sequence over the WebSocket channel (`/api/brain-mesh/nodes/socket`):
 
 1. Coordinator → node: `node.challenge` `{nonce}`
-2. Node → coordinator: `node.hello` `{nodeId, publicKey, joinToken?, signature?, protocolVersions, capabilities:[{op,maxConcurrency}], resources:{cpuCores,ollamaModels}, clientVersion}` — `joinToken` on first pairing, `signature` (over the nonce) on every reconnect after.
+2. Node → coordinator: `node.hello` `{nodeId, publicKey, joinToken?, signature?, protocolVersions, capabilities:[{op,maxConcurrency}], resources:{cpuCores,ollamaModels}, health, clientVersion}` — `joinToken` on first pairing, `signature` (over the nonce) on every reconnect after.
 3. Coordinator → node: `node.hello.ack` `{ok, nodeId, sessionId, heartbeatIntervalMs}` or `{ok:false, reason}`.
 
-Further `kind` values used only on this channel (never emitted to the in-process bus/SSE stream): `node.heartbeat` (periodic capability/load refresh), `node.job.assign` / `node.job.result` (job dispatch and its result, correlated by a `jobId`), `node.bye` (graceful disconnect).
+Further `kind` values used only on this channel (never emitted to the in-process bus/SSE stream): `node.heartbeat` `{capabilities, health}` (periodic capability/load refresh — see below), `node.job.assign` / `node.job.result` (job dispatch and its result, correlated by a `jobId`), `node.bye` (graceful disconnect).
+
+### Node health telemetry
+
+Every `node.hello` and `node.heartbeat` (default every `heartbeatIntervalMs`, 30s) carries a `health` object computed on the node by `node-client/src/health.js`: `{cpuCores, cpuPercent, ram:{totalMb,usedMb,percent}, uptimeSec, features:[...], ollamaModels:[...], collectedAt}`. `features` currently reports `["ollama"]` when a local Ollama instance answers `/api/tags`; it is meant to grow as node-client picks up more optional integrations, without needing a protocol version bump. The coordinator merges the latest `health` into that node's `brain_mesh_nodes.metadata_json` (`brainMeshNodeRepo.updateNodeHealth`, additive merge — it never clobbers other metadata keys) so `GET /api/brain-mesh/nodes/nodes` and the Settings "compute nodes" panel can show live CPU/RAM/feature status per node alongside its online/offline state. Health is best-effort telemetry only — it is never used for placement or trust decisions; `brainMeshPlacementService.pickNodeForJob` still keys off registered capability load, not health numbers.
 
 ### Placement
 

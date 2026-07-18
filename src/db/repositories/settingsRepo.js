@@ -28,6 +28,8 @@ const updateStmt = db.prepare(`
       fractional_min_notional_usd = @fractionalMinNotionalUsd,
       max_buy_order_notional_usd = @maxBuyOrderNotionalUsd,
       alpaca_statement_download_day = @alpacaStatementDownloadDay,
+      investing_mode = @investingMode,
+      council_sizing_enabled = @councilSizingEnabled,
       updated_at = datetime('now')
   WHERE user_id = @userId
 `);
@@ -150,6 +152,8 @@ function update(userId, patch) {
     fractionalMinNotionalUsd: patch.fractionalMinNotionalUsd ?? current.fractional_min_notional_usd ?? 1,
     maxBuyOrderNotionalUsd: patch.maxBuyOrderNotionalUsd ?? current.max_buy_order_notional_usd ?? 100,
     alpacaStatementDownloadDay: patch.alpacaStatementDownloadDay ?? current.alpaca_statement_download_day ?? 5,
+    investingMode: patch.investingMode ?? current.investing_mode ?? 'balanced',
+    councilSizingEnabled: patch.councilSizingEnabled ?? current.council_sizing_enabled ?? 0,
   };
   updateStmt.run(merged);
   return get(userId);

@@ -127,4 +127,72 @@ describe('agentDecisionTreeService', () => {
     expect(result.recommendedAction).toBe('hold');
     expect(result.decision.decision).toBe('HOLD');
   });
+
+  describe('applyInvestingMode', () => {
+    const baseMandate = agentDecisionTree.buildAgentMandate({
+      bias: { factors: { riskPenalty: 0.1, moat: 0.2, longHorizon: 0.2 } },
+    });
+
+    it('loosens the mandate for aggressive mode', () => {
+      const mandate = agentDecisionTree.applyInvestingMode(baseMandate, 'aggressive');
+      expect(mandate.requiredMarginOfSafety).toBeLessThan(baseMandate.requiredMarginOfSafety);
+      expect(mandate.maximumPositionWeight).toBeGreaterThan(baseMandate.maximumPositionWeight);
+      expect(mandate.targetHoldingPeriodMonths).toBeLessThan(baseMandate.targetHoldingPeriodMonths);
+      expect(mandate.maximumExpectedDownside).toBeGreaterThan(baseMandate.maximumExpectedDownside);
+      expect(mandate.investingMode).toBe('aggressive');
+    });
+
+    it('tightens the mandate for conservative mode', () => {
+      const mandate = agentDecisionTree.applyInvestingMode(baseMandate, 'conservative');
+      expect(mandate.requiredMarginOfSafety).toBeGreaterThan(baseMandate.requiredMarginOfSafety);
+      expect(mandate.maximumPositionWeight).toBeLessThan(baseMandate.maximumPositionWeight);
+      expect(mandate.targetHoldingPeriodMonths).toBeGreaterThan(baseMandate.targetHoldingPeriodMonths);
+      expect(mandate.maximumExpectedDownside).toBeLessThan(baseMandate.maximumExpectedDownside);
+    });
+
+    it('leaves the mandate unchanged for balanced mode and defaults unknown modes to balanced', () => {
+      const balanced = agentDecisionTree.applyInvestingMode(baseMandate, 'balanced');
+      const unknown = agentDecisionTree.applyInvestingMode(baseMandate, 'not-a-real-mode');
+      expect(balanced.requiredMarginOfSafety).toBe(baseMandate.requiredMarginOfSafety);
+      expect(balanced.maximumPositionWeight).toBe(baseMandate.maximumPositionWeight);
+      expect(unknown).toEqual(balanced);
+      expect(unknown.investingMode).toBe('balanced');
+    });
+  });
+
+  it('allows a larger buy position under aggressive mode than conservative mode for the same signal', () => {
+    const signal = {
+      symbol: 'MSFT',
+      price: 100,
+      changePct: 1.2,
+      volatilityPct: 1.5,
+      momentum: 'bullish',
+      actionBias: 'buy-candidate',
+      localAiScore: 92,
+      brokerFactorScore: 88,
+      investorPlaybookScore: 90,
+      jsonDatasetScore: 82,
+      theme: 'software+cloud+saas',
+      evidence: {
+        quote: { current: 100, open: 98, high: 101, low: 97, prevClose: 98 },
+        explanation: ['Strong free-cash-flow proxy', 'Durable software demand'],
+      },
+      discovery: {
+        evidence: [{ reason: 'New enterprise AI product adoption mentioned in crawled source.', url: 'https://example.com/source' }],
+      },
+      chatResearch: { reasons: ['Cloud demand appears resilient.'] },
+    };
+    const baseContext = { signals: [{ symbol: 'MSFT', localAiScore: 92 }], positions: [], accountState: { cash_balance_usd: 100000 } };
+
+    const aggressive = agentDecisionTree.evaluateSignalForAgent({
+      agent, personaBiasScore: 20, signal, context: { ...baseContext, investingMode: 'aggressive' },
+    });
+    const conservative = agentDecisionTree.evaluateSignalForAgent({
+      agent, personaBiasScore: 20, signal, context: { ...baseContext, investingMode: 'conservative' },
+    });
+
+    expect(aggressive.positionSizing.maximumAllowedWeight).toBeGreaterThan(conservative.positionSizing.maximumAllowedWeight);
+    expect(aggressive.mandate.investingMode).toBe('aggressive');
+    expect(conservative.mandate.investingMode).toBe('conservative');
+  });
 });

@@ -46,6 +46,23 @@ describe('time settings and simulation configuration', () => {
     expect(settings.agent_personality_refresh_time).toBe('19:30');
   });
 
+  it('defaults investing_mode to balanced and persists changes to it', () => {
+    const user = userRepo.createUser({
+      email: `investing-mode-${Date.now()}@example.com`,
+      passwordHash: 'x',
+      dailyLossLimitUsd: 10,
+      maxTradesPerSymbolPer24h: 3,
+    });
+
+    expect(settingsRepo.get(user.id).investing_mode).toBe('balanced');
+
+    settingsRepo.update(user.id, { investingMode: 'aggressive' });
+    expect(settingsRepo.get(user.id).investing_mode).toBe('aggressive');
+
+    settingsRepo.update(user.id, { investingMode: 'conservative' });
+    expect(settingsRepo.get(user.id).investing_mode).toBe('conservative');
+  });
+
   it('enforces weekday-only trading windows in the configured timezone', () => {
     const settings = {
       application_timezone: 'America/Chicago',

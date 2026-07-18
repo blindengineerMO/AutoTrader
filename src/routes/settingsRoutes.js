@@ -38,6 +38,8 @@ const settingsPatchSchema = z.object({
   fractionalMinNotionalUsd: z.number().positive().max(1000000).optional(),
   maxBuyOrderNotionalUsd: z.number().positive().max(100000000).optional(),
   alpacaStatementDownloadDay: z.number().int().min(1).max(28).optional(),
+  investingMode: z.enum(['aggressive', 'balanced', 'conservative']).optional(),
+  councilSizingEnabled: z.boolean().optional(),
   agentPersonalityRefreshEnabled: z.boolean().optional(),
   agentPersonalityRefreshTime: z.string().refine(timeSettings.isValidTime, 'Agent refresh time must be HH:mm').optional(),
   personalityTickCadenceCron: z.string().optional(),
@@ -145,11 +147,13 @@ router.patch('/', (req, res) => {
   const before = settingsRepo.get(req.user.id);
   const patch = { ...parsed.data };
   if (patch.tradingEnabled !== undefined) patch.tradingEnabled = patch.tradingEnabled ? 1 : 0;
+  if (patch.dayTradingEnabled !== undefined) patch.dayTradingEnabled = patch.dayTradingEnabled ? 1 : 0;
   if (patch.sourceLearningEnabled !== undefined) patch.sourceLearningEnabled = patch.sourceLearningEnabled ? 1 : 0;
   if (patch.simulationModeEnabled !== undefined) patch.simulationModeEnabled = patch.simulationModeEnabled ? 1 : 0;
   if (patch.fractionalTradingEnabled !== undefined) patch.fractionalTradingEnabled = patch.fractionalTradingEnabled ? 1 : 0;
   if (patch.agentPersonalityRefreshEnabled !== undefined) patch.agentPersonalityRefreshEnabled = patch.agentPersonalityRefreshEnabled ? 1 : 0;
   if (patch.agentLocalLearningEnabled !== undefined) patch.agentLocalLearningEnabled = patch.agentLocalLearningEnabled ? 1 : 0;
+  if (patch.councilSizingEnabled !== undefined) patch.councilSizingEnabled = patch.councilSizingEnabled ? 1 : 0;
   if (patch.excludedSymbols !== undefined) {
     patch.excludedSymbolsJson = JSON.stringify(patch.excludedSymbols);
     delete patch.excludedSymbols;

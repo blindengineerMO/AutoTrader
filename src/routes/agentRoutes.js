@@ -1,5 +1,7 @@
 const express = require('express');
 const personalityAgents = require('../services/personalityAgentService');
+const agentCalibrationRepo = require('../db/repositories/agentCalibrationRepo');
+const agentReviewQueueRepo = require('../db/repositories/agentReviewQueueRepo');
 
 const router = express.Router();
 
@@ -41,6 +43,27 @@ router.post('/import', (req, res) => {
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
+});
+
+router.get('/calibration', (req, res) => {
+  res.json({
+    summary: agentCalibrationRepo.listSummaryByUser(req.user.id),
+    buckets: agentCalibrationRepo.listBucketsByUser(req.user.id),
+  });
+});
+
+router.get('/review-queue', (req, res) => {
+  res.json(agentReviewQueueRepo.listByUser(req.user.id, { status: req.query.status || 'pending' }));
+});
+
+router.patch('/review-queue/:id', (req, res) => {
+  const status = req.body?.status;
+  if (!['reviewed', 'dismissed'].includes(status)) {
+    return res.status(400).json({ error: 'status must be "reviewed" or "dismissed"' });
+  }
+  const updated = agentReviewQueueRepo.updateStatus(Number(req.params.id), req.user.id, status, req.body?.note || null);
+  if (!updated) return res.status(404).json({ error: 'Review queue entry not found' });
+  res.json(updated);
 });
 
 router.get('/council/runs', (req, res) => {

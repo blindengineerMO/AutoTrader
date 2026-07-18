@@ -14,7 +14,7 @@
           <v-icon size="16">mdi-link-variant</v-icon>
           research URLs
         </button>
-        <button class="hud-window-toggle" @click="nodeWindowOpen = true">
+        <button class="hud-window-toggle" @click="nodeWindowOpen = true; loadNodes()">
           <v-icon size="16">mdi-lan-connect</v-icon>
           compute nodes
         </button>
@@ -170,6 +170,28 @@
           <div class="flex items-center gap-3 mt-5">
             <GlassButton :disabled="saving" @click="save">{{ saving ? 'Saving...' : 'Save settings' }}</GlassButton>
             <div v-if="saved" class="text-accent text-xs">Saved.</div>
+          </div>
+        </GlassCard>
+
+        <GlassCard title="Investing mode">
+          <p class="text-xs text-white/50 mb-5">
+            Controls how aggressive the decision board is when sizing positions, judging margin of safety,
+            and picking holding periods. Changes apply to the next council run.
+          </p>
+          <v-slider
+            v-model="investingModeIndex"
+            :tick-labels="investingModeTicks"
+            :max="2"
+            :min="0"
+            :step="1"
+            show-ticks="always"
+            color="primary"
+            hide-details
+            @update:model-value="save"
+          />
+          <div class="mini-glass p-4 mt-4">
+            <div class="text-xs text-white/38 uppercase tracking-wide">{{ investingModeMeta.label }}</div>
+            <div class="text-sm text-white/70 mt-1">{{ investingModeMeta.description }}</div>
           </div>
         </GlassCard>
 
@@ -546,13 +568,22 @@
                 <span class="hud-chip">expires {{ formatNodeTime(token.expires_at) }}</span>
               </div>
             </div>
-            <button
-              v-if="token.status === 'pending'"
-              class="hud-chip hud-chip-button"
-              @click="revokeJoinToken(token)"
-            >
-              revoke
-            </button>
+            <div class="flex gap-2">
+              <button
+                v-if="token.status === 'pending'"
+                class="hud-chip hud-chip-button"
+                @click="revokeJoinToken(token)"
+              >
+                revoke
+              </button>
+              <button
+                v-else
+                class="hud-chip hud-chip-button"
+                @click="deleteJoinToken(token)"
+              >
+                delete
+              </button>
+            </div>
           </div>
         </div>
 
@@ -566,6 +597,33 @@
                 <span class="hud-chip" :class="node.status === 'online' ? 'text-accent' : ''">{{ node.status }}</span>
                 <span class="hud-chip">{{ node.client_version || 'unknown version' }}</span>
                 <span class="hud-chip">last seen {{ formatNodeTime(node.last_seen_at) }}</span>
+              </div>
+              <div v-if="node.metadata?.health" class="hud-card-meta mt-1">
+                <span class="hud-chip" :class="healthTone(node.metadata.health.cpuPercent)">
+                  cpu {{ node.metadata.health.cpuPercent }}%
+                </span>
+                <span class="hud-chip" :class="healthTone(node.metadata.health.ram?.percent)">
+                  ram {{ node.metadata.health.ram?.percent }}% ({{ node.metadata.health.ram?.usedMb }}/{{ node.metadata.health.ram?.totalMb }} MB)
+                </span>
+                <span v-if="node.metadata.health.features?.length" class="hud-chip">
+                  {{ node.metadata.health.features.join(', ') }}
+                </span>
+                <span v-if="node.metadata.health.ollamaModels?.length" class="hud-chip">
+                  models: {{ node.metadata.health.ollamaModels.join(', ') }}
+                </span>
+                <span class="hud-chip">reported {{ formatNodeTime(node.metadata.health.collectedAt) }}</span>
+              </div>
+              <div v-if="jobStats[node.id]" class="hud-card-meta mt-1">
+                <span class="hud-chip">sent {{ jobStats[node.id].sent }}</span>
+                <span class="hud-chip text-accent">succeeded {{ jobStats[node.id].succeeded }}</span>
+                <span class="hud-chip" :class="jobStats[node.id].failed ? 'text-red-400' : ''">failed {{ jobStats[node.id].failed }}</span>
+                <span v-if="jobStats[node.id].timedOut" class="hud-chip text-amber-400">timed out {{ jobStats[node.id].timedOut }}</span>
+                <span v-if="jobStats[node.id].pending" class="hud-chip">in flight {{ jobStats[node.id].pending }}</span>
+              </div>
+              <div v-if="jobStats[node.id]?.failureReasons?.length" class="mt-1 text-[11px] text-white/40 space-y-0.5">
+                <div v-for="(failure, idx) in jobStats[node.id].failureReasons.slice(0, 3)" :key="idx" class="truncate">
+                  {{ failure.op }}: {{ failure.error }}
+                </div>
               </div>
             </div>
             <button class="hud-chip hud-chip-button" @click="revokeNode(node)">
@@ -607,6 +665,7 @@ const form = ref({
   fractionalMinNotionalUsd: 1,
   maxBuyOrderNotionalUsd: 100,
   alpacaStatementDownloadDay: 5,
+  investingMode: 'balanced',
   agentPersonalityRefreshEnabled: true,
   agentPersonalityRefreshTime: '20:00',
   agentLocalLearningEnabled: false,
@@ -634,6 +693,7 @@ const nodeWindowPosition = ref({ x: 420, y: 172 });
 const settingsWindowDrag = ref(null);
 const joinTokens = ref([]);
 const nodes = ref([]);
+const jobStats = ref({});
 const newTokenLabel = ref('');
 const newTokenPlaintext = ref('');
 const creatingToken = ref(false);
@@ -699,6 +759,28 @@ const providerPriority = {
   'sec-edgar': 2,
 };
 
+const INVESTING_MODES = ['aggressive', 'balanced', 'conservative'];
+const INVESTING_MODE_META = {
+  aggressive: {
+    label: 'Aggressive',
+    description: 'Larger position sizes, shorter holding periods, and a lower margin-of-safety bar to chase high-conviction momentum. Day trading still requires its own opt-in below due to tax implications.',
+  },
+  balanced: {
+    label: 'Balanced',
+    description: 'Moderate position sizes (5-10% of portfolio), medium holding periods, and the default margin-of-safety requirement.',
+  },
+  conservative: {
+    label: 'Conservative',
+    description: 'Smaller, highly diversified positions, longer holding periods, and a higher margin-of-safety bar that favors capital preservation.',
+  },
+};
+const investingModeTicks = ['Aggressive', 'Balanced', 'Conservative'];
+const investingModeIndex = computed({
+  get: () => Math.max(0, INVESTING_MODES.indexOf(form.value.investingMode)),
+  set: (index) => { form.value.investingMode = INVESTING_MODES[index] ?? 'balanced'; },
+});
+const investingModeMeta = computed(() => INVESTING_MODE_META[form.value.investingMode] || INVESTING_MODE_META.balanced);
+
 const providerGroups = computed(() => {
   const grouped = new Map();
   providers.value.forEach((provider) => {
@@ -739,6 +821,7 @@ async function load() {
     fractionalMinNotionalUsd: data.fractional_min_notional_usd || 1,
     maxBuyOrderNotionalUsd: data.max_buy_order_notional_usd || 100,
     alpacaStatementDownloadDay: data.alpaca_statement_download_day || 5,
+    investingMode: data.investing_mode || 'balanced',
     agentPersonalityRefreshEnabled: Boolean(data.agent_personality_refresh_enabled),
     agentPersonalityRefreshTime: data.agent_personality_refresh_time || '20:00',
     agentLocalLearningEnabled: Boolean(data.agent_local_learning_enabled),
@@ -874,17 +957,24 @@ async function updateSource(source, patch) {
 
 function formatNodeTime(value) {
   if (!value) return 'never';
-  return new Date(`${value.replace(' ', 'T')}Z`).toLocaleString();
+  const iso = value.endsWith('Z') ? value : `${value.replace(' ', 'T')}Z`;
+  return new Date(iso).toLocaleString();
+}
+
+function healthTone(percent) {
+  return percent >= 90 ? 'text-danger' : '';
 }
 
 async function loadNodes() {
   try {
-    const [tokensRes, nodesRes] = await Promise.all([
+    const [tokensRes, nodesRes, statsRes] = await Promise.all([
       api.get('/brain-mesh/nodes/join-tokens'),
       api.get('/brain-mesh/nodes/nodes'),
+      api.get('/brain-mesh/nodes/nodes/job-stats'),
     ]);
     joinTokens.value = tokensRes.data;
     nodes.value = nodesRes.data;
+    jobStats.value = statsRes.data;
   } catch (err) {
     nodeError.value = err.response?.data?.error || 'Failed to load compute nodes';
   }
@@ -917,6 +1007,16 @@ async function revokeJoinToken(token) {
     await loadNodes();
   } catch (err) {
     nodeError.value = err.response?.data?.error || 'Failed to revoke join token';
+  }
+}
+
+async function deleteJoinToken(token) {
+  nodeError.value = '';
+  try {
+    await api.delete(`/brain-mesh/nodes/join-tokens/${token.id}/purge`);
+    await loadNodes();
+  } catch (err) {
+    nodeError.value = err.response?.data?.error || 'Failed to delete join token';
   }
 }
 

@@ -8,7 +8,7 @@ const locationCoordinator = require('./locationCoordinatorService');
 const watcherAgentService = require('./watcherAgentService');
 const finnhub = require('./marketData/finnhubClient');
 const researchQuestionReasoning = require('./researchQuestionReasoningService');
-const crawleeCrawler = require('./crawleeResearchCrawlerService');
+const brainMesh = require('./brainMeshService');
 const eventOutcomeLabeling = require('./eventOutcomeLabelingService');
 
 const DEEP_CRAWL_MAX_REQUESTS = 6;
@@ -91,13 +91,19 @@ async function deepenCompany({ userId, company }) {
 
   const observations = [];
   if (reasoned.questions.length) {
-    const crawled = await crawleeCrawler
-      .crawlAutonomousResearch({ queries: reasoned.questions, maxRequests: DEEP_CRAWL_MAX_REQUESTS, maxWaves: DEEP_CRAWL_MAX_WAVES })
+    const crawled = await brainMesh.ask({
+      from: 'brain.idle-research',
+      to: ['brain.research.source'],
+      op: 'crawler.search',
+      ctx: { userId },
+      body: { queries: reasoned.questions, maxRequests: DEEP_CRAWL_MAX_REQUESTS, maxWaves: DEEP_CRAWL_MAX_WAVES },
+    }, { timeoutMs: 30_000 })
+      .then((askResult) => askResult.replies?.find((reply) => reply.kind === 'reply')?.body || { pages: [] })
       .catch((error) => {
         logger.warn('Idle deep crawl failed', { symbol: company.symbol, error: error.message });
         return { pages: [] };
       });
-    observations.push(...crawled.pages.map((page) => ({ title: page.title, excerpt: page.excerpt, url: page.url })));
+    observations.push(...(crawled.pages || []).map((page) => ({ title: page.title, excerpt: page.excerpt, url: page.url })));
   }
 
   companyIntelligenceRepo.save({

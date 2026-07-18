@@ -27,8 +27,18 @@ router.delete('/join-tokens/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+router.delete('/join-tokens/:id/purge', (req, res) => {
+  const deleted = nodeRepo.deleteJoinToken(req.params.id, req.user.id);
+  if (!deleted) return res.status(404).json({ error: 'join token not found or still pending (revoke it first)' });
+  res.json({ ok: true });
+});
+
 router.get('/nodes', (req, res) => {
   res.json(nodeRepo.listNodes(req.user.id));
+});
+
+router.get('/nodes/job-stats', (req, res) => {
+  res.json(nodeRepo.getJobStatsForUser(req.user.id));
 });
 
 router.delete('/nodes/:nodeId', (req, res) => {

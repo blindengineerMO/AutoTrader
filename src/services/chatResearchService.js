@@ -8,6 +8,7 @@ const ollamaResearchTools = require('./ollamaResearchToolService');
 
 const TOKEN_CHAR_RATIO = 4;
 const OLLAMA_PROMPT_SAFETY_TOKENS = 300;
+const OLLAMA_CHUNK_RETRY_ATTEMPTS = 2;
 
 const SYSTEM_PROMPT = `You are an autonomous investment research assistant inside AutoTrader.
 Use only the evidence supplied in the prompt. Do not invent URLs, prices, or facts.
@@ -325,10 +326,31 @@ async function askOllamaResearchAgent({ baseUrl, model, payload, systemPrompt, o
       });
     }
 
-    const result = config.ollamaToolCallingEnabled
-      ? await askOllamaResearchChunkWithTools({ baseUrl, model, payload: chunkedPayload, systemPrompt: localSystemPrompt, onEvent })
-      : await ollamaClient.askOllamaJson({ baseUrl, model, payload: chunkedPayload, systemPrompt: localSystemPrompt });
-    results.push(result);
+    for (let attempt = 1; attempt <= OLLAMA_CHUNK_RETRY_ATTEMPTS; attempt += 1) {
+      try {
+        const result = config.ollamaToolCallingEnabled
+          ? await askOllamaResearchChunkWithTools({ baseUrl, model, payload: chunkedPayload, systemPrompt: localSystemPrompt, onEvent })
+          : await ollamaClient.askOllamaJson({ baseUrl, model, payload: chunkedPayload, systemPrompt: localSystemPrompt });
+        results.push(result);
+        break;
+      } catch (err) {
+        // Malformed/truncated JSON is often a one-off sampling/num_predict-cutoff
+        // fluke rather than a deterministic failure, so retrying the same chunk
+        // before giving up on it recovers most cases without any code change.
+        emit(onEvent, 'ollama-chunking', 36, 'warn', attempt < OLLAMA_CHUNK_RETRY_ATTEMPTS
+          ? 'Local Ollama research chunk failed; retrying chunk.'
+          : 'Local Ollama research chunk failed; skipping to next chunk.', {
+          chunk: index + 1,
+          totalChunks: payloadChunks.length,
+          attempt,
+          error: err.message,
+        });
+      }
+    }
+  }
+
+  if (!results.length) {
+    throw new Error(`All ${payloadChunks.length} local Ollama research chunk(s) failed`);
   }
 
   return mergeOllamaChunkResults(results);

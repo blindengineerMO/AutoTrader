@@ -4,6 +4,7 @@ const finnhubClient = require('./marketData/finnhubClient');
 const { ETF_PROXIES } = require('./companyDiscoveryService');
 const { config } = require('../config');
 const logger = require('../utils/logger');
+const { tradingDaysSince, computeReturnPct } = require('../utils/tradingCalendar');
 
 const MAX_EVENTS_PER_CANDIDATE = 8;
 const MIN_ABS_EVENT_SCORE = 0.5;
@@ -63,13 +64,8 @@ function normalizeDate(value) {
 }
 
 function computeReturn(from, to) {
-  if (!Number.isFinite(from) || !Number.isFinite(to) || from === 0) return null;
-  return Number((((to - from) / from) * 100).toFixed(3));
-}
-
-function tradingDaysSince(eventDate) {
-  const calendarDays = Math.floor((Date.now() - new Date(eventDate).getTime()) / 86400000);
-  return Math.max(0, Math.round(calendarDays * (5 / 7)));
+  const pct = computeReturnPct(from, to);
+  return pct == null ? null : Number(pct.toFixed(3));
 }
 
 async function backfillOutcomes({ userId }) {

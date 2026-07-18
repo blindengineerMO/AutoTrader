@@ -1,12 +1,14 @@
 const WebSocket = require('ws');
 const { signNonce, markPaired } = require('./identity');
 const { runScrapeJob } = require('./jobs/scrapeJob');
+const { runSearchJob } = require('./jobs/searchJob');
+const { collectHealth } = require('./health');
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const MIN_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 60_000;
 
-const JOB_RUNNERS = { 'crawler.crawl': runScrapeJob };
+const JOB_RUNNERS = { 'crawler.crawl': runScrapeJob, 'crawler.search': runSearchJob };
 
 function send(socket, message) {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
@@ -53,6 +55,7 @@ function connect({ identity, config, resources, capabilities, log = console }) {
           protocolVersions: ['BMCL/2.0'],
           capabilities,
           resources,
+          health: await collectHealth(),
           clientVersion: require('../package.json').version,
           label: config.label,
         };
@@ -77,8 +80,9 @@ function connect({ identity, config, resources, capabilities, log = console }) {
           markPaired();
         }
         log.info(`Joined mesh as ${body.nodeId}`);
-        heartbeatTimer = setInterval(() => {
-          send(socket, { kind: 'node.heartbeat', body: { capabilities } });
+        heartbeatTimer = setInterval(async () => {
+          const health = await collectHealth();
+          send(socket, { kind: 'node.heartbeat', body: { capabilities, health } });
         }, body.heartbeatIntervalMs || HEARTBEAT_INTERVAL_MS);
         return;
       }

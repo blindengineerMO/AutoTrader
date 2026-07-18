@@ -14,7 +14,29 @@ const alertingService = require('./alertingService');
 const simulationAccountReconciliation = require('./simulationAccountReconciliationService');
 const alpacaRules = require('./alpacaRulesService');
 const crossSourceAgreement = require('./crossSourceAgreementService');
+const agentConsensusSizingRepo = require('../db/repositories/agentConsensusSizingRepo');
 const logger = require('../utils/logger');
+
+// When council_sizing_enabled is on, shrinks an order's quantity by the personality-agent
+// council's disagreement factor for that symbol (if a fresh reading exists). Returns the
+// original quantity unchanged when the setting is off, there's no reading, or it's stale --
+// this keeps tradingCycle fully backward-compatible for users who never touch the council.
+function applyCouncilSizing(userId, settings, symbol, quantity) {
+  if (!settings?.council_sizing_enabled) return quantity;
+  const sizing = agentConsensusSizingRepo.getFreshForSymbol(userId, symbol, { maxAgeHours: 48 });
+  if (!sizing) return quantity;
+  const scaled = Math.floor(Number(quantity || 0) * sizing.disagreement_factor);
+  if (scaled !== quantity) {
+    logger.info('Council disagreement scaled order quantity', {
+      userId,
+      symbol,
+      from: quantity,
+      to: scaled,
+      disagreementFactor: sizing.disagreement_factor,
+    });
+  }
+  return scaled;
+}
 
 /**
  * Runs one full research -> plan -> validate -> execute cycle for a user.
@@ -197,7 +219,7 @@ async function runTradingCycleInner({
     }
     if (mode === 'simulation') {
       if (persistentSimulation) {
-        const result = recordPersistentSimulatedFill({ userId, brokerAccount, action, researchSnapshot });
+        const result = recordPersistentSimulatedFill({ userId, brokerAccount, action, researchSnapshot, settings });
         tradingPlanRepo.setActionStatus(action.id, result.status);
       } else {
         tradingPlanRepo.setActionStatus(action.id, `simulated_would_${action.action}`);
@@ -205,7 +227,7 @@ async function runTradingCycleInner({
       }
       continue;
     }
-    await executeAction({ userId, brokerAccount, broker, action, researchSnapshot, equityUsd });
+    await executeAction({ userId, brokerAccount, broker, action, researchSnapshot, equityUsd, settings });
   }
 
   const finalPlan = tradingPlanRepo.getById(plan.id);
@@ -241,8 +263,13 @@ function buildSimulationReason({ settings, broker }) {
   return 'Simulation mode was requested explicitly.';
 }
 
-async function executeAction({ userId, brokerAccount, broker, action, researchSnapshot, equityUsd }) {
+async function executeAction({ userId, brokerAccount, broker, action, researchSnapshot, equityUsd, settings }) {
   const signal = researchSnapshot.signals.find((s) => s.symbol === action.symbol);
+  action.quantity = applyCouncilSizing(userId, settings, action.symbol, action.quantity || 0);
+  if (action.quantity <= 0) {
+    tradingPlanRepo.setActionStatus(action.id, 'blocked: council_disagreement_zeroed_quantity');
+    return;
+  }
   const estimatedUsd = (action.quantity || 1) * (signal?.price || 0);
 
   const check = rulesEngine.checkTradeAllowed({
@@ -343,9 +370,10 @@ function recordSimulatedLedgerEntry({ userId, brokerAccount, action, researchSna
   });
 }
 
-function recordPersistentSimulatedFill({ userId, brokerAccount, action, researchSnapshot }) {
+function recordPersistentSimulatedFill({ userId, brokerAccount, action, researchSnapshot, settings }) {
   const signal = researchSnapshot.signals.find((s) => s.symbol === action.symbol);
   const fillPrice = Number(signal?.price || 0);
+  action.quantity = applyCouncilSizing(userId, settings, action.symbol, action.quantity || 0);
   const quantity = Number(action.quantity || 0);
   const notional = fillPrice * quantity;
   if (!fillPrice || !quantity || notional <= 0) return { status: 'simulated_rejected: invalid quantity or price' };

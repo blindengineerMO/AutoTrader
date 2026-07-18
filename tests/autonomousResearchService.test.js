@@ -14,7 +14,9 @@ migrate();
 
 const userRepo = require('../src/db/repositories/userRepo');
 const brainMesh = require('../src/services/brainMeshService');
-const { NEWS_FEEDS, selectValuableArticles, scoreCandidates, listRecentWatcherSignals } = require('../src/services/autonomousResearchService');
+const crawleeCrawler = require('../src/services/crawleeResearchCrawlerService');
+const gdeltDoc = require('../src/services/gdeltDocService');
+const { NEWS_FEEDS, selectValuableArticles, scoreCandidates, listRecentWatcherSignals, collectNews } = require('../src/services/autonomousResearchService');
 
 function newUser() {
   return userRepo.createUser({
@@ -241,5 +243,61 @@ describe('watcher.research.reported feeding scoreCandidates', () => {
 
     expect(listRecentWatcherSignals(userB, 'SCOPE')).toHaveLength(0);
     expect(listRecentWatcherSignals(userA, 'OTHER')).toHaveLength(0);
+  });
+});
+
+describe('collectNews BMCL crawl fallback', () => {
+  let fetchSpy;
+  let gdeltSpy;
+  let crawlSpy;
+
+  beforeEach(() => {
+    gdeltSpy = vi.spyOn(gdeltDoc, 'collectGdeltResearch').mockResolvedValue({ articles: [], sources: [], entityLeads: [] });
+  });
+
+  afterEach(() => {
+    fetchSpy?.mockRestore();
+    gdeltSpy?.mockRestore();
+    crawlSpy?.mockRestore();
+  });
+
+  it('falls back to a BMCL crawler.crawl request when a news feed fetch fails, and merges recovered articles', async () => {
+    const failingFeed = NEWS_FEEDS[0];
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      if (url === failingFeed.url) throw new Error('This operation was aborted');
+      return { ok: true, text: async () => '<rss></rss>' };
+    });
+    crawlSpy = vi.spyOn(crawleeCrawler, 'crawlAutonomousResearch').mockResolvedValue({
+      pages: [{
+        url: failingFeed.url,
+        title: 'Recovered headline',
+        excerpt: 'Recovered article body text.',
+        score: { relevance: 5, tags: [] },
+        userData: {},
+      }],
+      failures: [],
+      discovered: [],
+      entityLeads: [],
+    });
+
+    const result = await collectNews(() => {}, {});
+
+    expect(crawlSpy).toHaveBeenCalled();
+    const recovered = result.items.find((item) => item.link === failingFeed.url);
+    expect(recovered).toMatchObject({ title: 'Recovered headline', description: 'Recovered article body text.' });
+    expect(result.sources.some((source) => source.type === 'news-rss-bmcl-fallback')).toBe(true);
+  });
+
+  it('does not add fallback items when the BMCL crawl also fails to recover the feed', async () => {
+    const failingFeed = NEWS_FEEDS[1];
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      if (url === failingFeed.url) throw new Error('This operation was aborted');
+      return { ok: true, text: async () => '<rss></rss>' };
+    });
+    crawlSpy = vi.spyOn(crawleeCrawler, 'crawlAutonomousResearch').mockResolvedValue({ pages: [], failures: [], discovered: [], entityLeads: [] });
+
+    const result = await collectNews(() => {}, {});
+
+    expect(result.items.some((item) => item.link === failingFeed.url)).toBe(false);
   });
 });

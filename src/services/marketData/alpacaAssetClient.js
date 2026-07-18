@@ -68,6 +68,14 @@ async function fetchAssetFromAlpaca(normalized, userId) {
     return normalizeAsset(asset, normalized);
   } catch (error) {
     if (isNotFound(error)) {
+      // The single-asset endpoint can 404 spuriously (rate limiting, a
+      // transient Alpaca hiccup, symbol formatting quirks). Before treating
+      // that as a confirmed "this asset doesn't exist," cross-check it
+      // against GET /v2/assets?status=active&asset_class=us_equity — the
+      // bulk active-asset list — so a symbol that's genuinely tradable isn't
+      // permanently excluded off a false negative from the single lookup.
+      const crossCheck = await crossCheckActiveAssetList(normalized, userId);
+      if (crossCheck) return crossCheck;
       return {
         available: true,
         symbol: normalized,
@@ -78,6 +86,17 @@ async function fetchAssetFromAlpaca(normalized, userId) {
     }
     logger.warn('Alpaca asset lookup failed', { userId, symbol: normalized, error: error.message });
     return { available: false, symbol: normalized, reason: 'alpaca-lookup-failed', error: error.message };
+  }
+}
+
+async function crossCheckActiveAssetList(normalized, userId) {
+  try {
+    const list = await getTradableAssets({ userId });
+    if (!list.available) return null;
+    return list.assets.find((asset) => asset.symbol === normalized) || null;
+  } catch (error) {
+    logger.warn('Alpaca active-asset-list cross-check failed', { userId, symbol: normalized, error: error.message });
+    return null;
   }
 }
 
@@ -256,7 +275,13 @@ function scoreAssetMatch(asset, normalizedNeedle, originalQuery) {
 
 function isNotFound(error) {
   const status = error?.statusCode || error?.status || error?.response?.statusCode || error?.response?.status;
-  return status === 404 || /not found|404/i.test(String(error?.message || ''));
+  if (status === 404) return true;
+  // Any other explicit HTTP status (rate limit, server error, auth failure)
+  // is a known non-404 outcome — don't let its message text (which could
+  // coincidentally mention "404" or "not found") misclassify it as a
+  // confirmed-missing asset.
+  if (status) return false;
+  return /\bnot found\b/i.test(String(error?.message || ''));
 }
 
 function looksLikeSymbol(value) {

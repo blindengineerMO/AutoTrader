@@ -4,6 +4,8 @@ const { runTradingCycle } = require('../services/tradingCycle');
 const autonomousResearchService = require('../services/autonomousResearchService');
 const evaluationService = require('../services/evaluationService');
 const eventOutcomeLabeling = require('../services/eventOutcomeLabelingService');
+const agentOutcomeLabeling = require('../services/agentOutcomeLabelingService');
+const confidenceCalibration = require('../services/confidenceCalibrationService');
 const challengerScorerService = require('../services/challengerScorerService');
 const watcherAgentService = require('../services/watcherAgentService');
 const watcherBehaviorService = require('../services/watcherBehaviorService');
@@ -153,6 +155,16 @@ async function runEvaluationForUser(userId) {
     challengerScorerService.trainChallenger({ userId });
   } catch (err) {
     logger.warn('Event-outcome challenger training failed', { userId, error: err.message });
+  }
+  try {
+    await agentOutcomeLabeling.backfillOutcomes({ userId });
+  } catch (err) {
+    logger.warn('Recommendation outcome backfill failed', { userId, error: err.message });
+  }
+  try {
+    confidenceCalibration.runCalibration({ userId });
+  } catch (err) {
+    logger.warn('Confidence calibration run failed', { userId, error: err.message });
   }
 }
 

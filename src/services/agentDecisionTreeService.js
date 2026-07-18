@@ -49,6 +49,45 @@ const DECISION_STEP_IDS = Object.freeze([
 
 const ETF_SYMBOLS = new Set(['SPY', 'QQQ', 'DIA', 'IWM', 'VTI', 'VOO', 'XLE', 'XLF', 'XLV', 'XLU', 'XLY', 'ITA', 'SOXX']);
 
+// Multipliers applied to a built mandate at evaluation time, per METHODS.md's
+// three investing modes. Read fresh from context on every call rather than
+// baked into the cached per-agent mandate, so a user moving the slider takes
+// effect on the very next council run without needing a cache-bust.
+const INVESTING_MODE_ADJUSTMENTS = Object.freeze({
+  aggressive: {
+    requiredMarginOfSafety: { multiplier: 0.6, min: 0.08, max: 0.35 },
+    maximumPositionWeight: { multiplier: 1.8, min: 0.01, max: 0.08 },
+    targetHoldingPeriodMonths: { multiplier: 0.25, min: 1, max: 60 },
+    maximumExpectedDownside: { multiplier: 1.3, min: 0.15, max: 0.55 },
+  },
+  balanced: {
+    requiredMarginOfSafety: { multiplier: 1, min: 0.08, max: 0.35 },
+    maximumPositionWeight: { multiplier: 1, min: 0.01, max: 0.08 },
+    targetHoldingPeriodMonths: { multiplier: 1, min: 1, max: 60 },
+    maximumExpectedDownside: { multiplier: 1, min: 0.15, max: 0.55 },
+  },
+  conservative: {
+    requiredMarginOfSafety: { multiplier: 1.4, min: 0.08, max: 0.4 },
+    maximumPositionWeight: { multiplier: 0.5, min: 0.005, max: 0.08 },
+    targetHoldingPeriodMonths: { multiplier: 1.5, min: 1, max: 60 },
+    maximumExpectedDownside: { multiplier: 0.6, min: 0.1, max: 0.55 },
+  },
+});
+
+function applyInvestingMode(mandate, investingMode) {
+  const adjustments = INVESTING_MODE_ADJUSTMENTS[investingMode] || INVESTING_MODE_ADJUSTMENTS.balanced;
+  const adjusted = { ...mandate };
+  for (const [field, { multiplier, min, max }] of Object.entries(adjustments)) {
+    adjusted[field] = clamp(Number(mandate[field] || 0) * multiplier, min, max);
+  }
+  adjusted.requiredMarginOfSafety = round(adjusted.requiredMarginOfSafety, 4);
+  adjusted.maximumPositionWeight = round(adjusted.maximumPositionWeight, 4);
+  adjusted.targetHoldingPeriodMonths = Math.round(adjusted.targetHoldingPeriodMonths);
+  adjusted.maximumExpectedDownside = round(adjusted.maximumExpectedDownside, 4);
+  adjusted.investingMode = INVESTING_MODE_ADJUSTMENTS[investingMode] ? investingMode : 'balanced';
+  return adjusted;
+}
+
 function buildAgentMandate(agentOrProfile = {}) {
   const bias = agentOrProfile.bias || {};
   const factors = bias.factors || {};
@@ -98,7 +137,8 @@ function buildDecisionFramework(agentOrProfile = {}) {
 }
 
 function evaluateSignalForAgent({ agent, signal, context = {}, personaBiasScore = 0, now = new Date() }) {
-  const mandate = agent?.model?.decisionFramework?.mandate || buildAgentMandate(agent || {});
+  const baseMandate = agent?.model?.decisionFramework?.mandate || buildAgentMandate(agent || {});
+  const mandate = applyInvestingMode(baseMandate, context?.investingMode);
   const currentPrice = number(signal?.price || signal?.evidence?.quote?.current);
   const localAiScore = scoreValue(signal?.localAiScore, 50);
   const volatilityPct = Math.max(0, number(signal?.volatilityPct));
@@ -290,7 +330,7 @@ function evaluateSignalForAgent({ agent, signal, context = {}, personaBiasScore 
     { changePct, volatilityPct, momentum: signal?.momentum || null }
   ));
 
-  const stressTests = buildStressTests({ scenarios, volatilityPct, valuation, currentPrice });
+  const stressTests = buildStressTests({ scenarios, volatilityPct, valuation, currentPrice, mandate });
   const severeStress = stressTests.find((test) => test.scenario === 'severe_recession');
   gates.push(gate(
     'stress-tests',
@@ -569,11 +609,15 @@ function buildPremortem({ signal, volatilityPct, datasetScore, investorScore, va
   }));
 }
 
-function buildStressTests({ scenarios, volatilityPct, valuation, currentPrice }) {
+function buildStressTests({ scenarios, volatilityPct, valuation, currentPrice, mandate }) {
   const price = currentPrice || 1;
   const recessionValue = price * Math.max(0.15, 1 + scenarios.bear.revenueGrowth - 0.18 - volatilityPct / 90);
   const rateShockValue = price * Math.max(0.2, 1 + scenarios.base.revenueGrowth - 0.12 - volatilityPct / 120);
   const marginCompressionValue = price * Math.max(0.2, 1 + scenarios.base.revenueGrowth - 0.1);
+  // How much downside a scenario has to survive to keep the trade viable
+  // scales with the mandate's own downside tolerance (aggressive mode
+  // tolerates deeper drawdowns before a stress test hard-fails the gate).
+  const downsideTolerance = mandate?.maximumExpectedDownside || GLOBAL_MANDATE.maximumExpectedDownside;
   return [
     {
       scenario: 'severe_recession',
@@ -582,7 +626,7 @@ function buildStressTests({ scenarios, volatilityPct, valuation, currentPrice })
       multipleChange: -0.25,
       stressedValue: round(recessionValue),
       expectedLoss: round((price - recessionValue) / price, 4),
-      survives: (price - recessionValue) / price <= 0.35,
+      survives: (price - recessionValue) / price <= downsideTolerance,
     },
     {
       scenario: 'interest_rates_up_200_basis_points',
@@ -590,20 +634,20 @@ function buildStressTests({ scenarios, volatilityPct, valuation, currentPrice })
       refinancingCostChange: 0.025,
       stressedValue: round(rateShockValue),
       expectedLoss: round((price - rateShockValue) / price, 4),
-      survives: (price - rateShockValue) / price <= 0.35,
+      survives: (price - rateShockValue) / price <= downsideTolerance,
     },
     {
       scenario: 'gross_margin_compression',
       grossMarginChange: -0.05,
       stressedValue: round(marginCompressionValue),
       expectedLoss: round((price - marginCompressionValue) / price, 4),
-      survives: (price - marginCompressionValue) / price <= 0.35,
+      survives: (price - marginCompressionValue) / price <= downsideTolerance,
     },
     {
       scenario: 'valuation_sensitivity',
       stressedValue: round(valuation.bear),
       expectedLoss: round((price - valuation.bear) / price, 4),
-      survives: (price - valuation.bear) / price <= 0.4,
+      survives: (price - valuation.bear) / price <= downsideTolerance + 0.05,
     },
   ];
 }
@@ -875,5 +919,6 @@ module.exports = {
   DECISION_STEP_IDS,
   buildAgentMandate,
   buildDecisionFramework,
+  applyInvestingMode,
   evaluateSignalForAgent,
 };

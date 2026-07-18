@@ -46,6 +46,15 @@
             <v-icon size="15">mdi-history</v-icon>
             runs
           </button>
+          <button
+            class="hud-window-toggle"
+            :class="{ active: reviewQueueWindowOpen }"
+            @click="openReviewQueue"
+          >
+            <v-icon size="15">mdi-flag-outline</v-icon>
+            review queue
+            <span v-if="reviewQueue.length" class="hud-window-toggle-badge">{{ reviewQueue.length }}</span>
+          </button>
           <GlassButton variant="ghost" :disabled="Boolean(busy)" @click="dialogOpen = true">
             <v-icon size="16" class="mr-1">mdi-account-plus</v-icon>
             Add agent
@@ -261,6 +270,38 @@
     </aside>
 
     <aside
+      v-if="reviewQueueWindowOpen"
+      class="floating-glass-window floating-agent-window floating-agent-review-queue"
+    >
+      <div class="floating-window-head">
+        <span>
+          Active-learning review queue
+          <small>{{ reviewQueue.length }} flagged</small>
+        </span>
+        <button @click="reviewQueueWindowOpen = false"><v-icon size="16">mdi-close</v-icon></button>
+      </div>
+      <div class="floating-window-body">
+        <div v-if="!reviewQueue.length" class="text-white/42 text-sm">Nothing flagged for review right now.</div>
+        <div v-else class="flex flex-col gap-3">
+          <div v-for="item in reviewQueue" :key="item.id" class="review-queue-row mini-glass">
+            <span>
+              <strong>{{ item.symbol }}</strong>
+              <small class="review-queue-reason">{{ item.reason.replace('_', ' ') }}</small>
+              <small>
+                conviction {{ item.mean_conviction }} · stddev {{ item.conviction_std_dev }} ·
+                {{ item.buy_votes }} buy / {{ item.sell_votes }} sell · disagreement {{ item.disagreement_factor }}
+              </small>
+            </span>
+            <span class="review-queue-actions">
+              <button class="hud-window-toggle" @click="resolveReviewQueueItem(item.id, 'reviewed')">reviewed</button>
+              <button class="hud-window-toggle" @click="resolveReviewQueueItem(item.id, 'dismissed')">dismiss</button>
+            </span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <aside
       v-if="runResultWindowOpen && selectedRunResult"
       class="floating-glass-window floating-agent-window floating-agent-run-results"
       :style="{ transform: `translate(${runResultWindowPosition.x}px, ${runResultWindowPosition.y}px)` }"
@@ -412,6 +453,8 @@ const importDialogOpen = ref(false);
 const recommendationsWindowOpen = ref(false);
 const historyWindowOpen = ref(false);
 const runResultWindowOpen = ref(false);
+const reviewQueueWindowOpen = ref(false);
+const reviewQueue = ref([]);
 const selectedRunResult = ref(null);
 const runResultWindowPosition = ref({ x: 0, y: 0 });
 const agentSourcePage = ref(1);
@@ -461,6 +504,22 @@ async function load() {
   agents.value = agentRes.data;
   runs.value = runRes.data;
   selectedAgent.value = agents.value.find((agent) => agent.id === selectedAgent.value?.id) || agents.value[0] || null;
+  await fetchReviewQueue();
+}
+
+async function fetchReviewQueue() {
+  const { data } = await api.get('/agents/review-queue');
+  reviewQueue.value = data;
+}
+
+function openReviewQueue() {
+  reviewQueueWindowOpen.value = true;
+  fetchReviewQueue();
+}
+
+async function resolveReviewQueueItem(id, status) {
+  await api.patch(`/agents/review-queue/${id}`, { status });
+  reviewQueue.value = reviewQueue.value.filter((item) => item.id !== id);
 }
 
 async function createAgent() {

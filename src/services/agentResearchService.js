@@ -3,7 +3,6 @@ const providerCredentialRepo = require('../db/repositories/providerCredentialRep
 const researchSourceRepo = require('../db/repositories/researchSourceRepo');
 const finnhub = require('./marketData/finnhubClient');
 const alpacaAssetClient = require('./marketData/alpacaAssetClient');
-const crawler = require('./crawleeResearchCrawlerService');
 const companyDiscovery = require('./companyDiscoveryService');
 const brainMesh = require('./brainMeshService');
 const { config } = require('../config');
@@ -68,16 +67,25 @@ async function executeRun(runId, createAgent) {
     });
 
     setRun(run, { phase: 'crawlee-agent-profile', progress: 12 });
-    const crawl = await crawler.crawlAutonomousResearch({
-      queries: buildResearchQuestions(run.name),
-      maxRequests: 180,
-      maxFollowUps: 28,
-      minContinuationScore: 1.45,
-      maxWaves: 10,
-      maxSearchExpansions: 72,
-      maxRuntimeMs: 8 * 60 * 1000,
-      onEvent,
-    });
+    const agentProfileMaxRuntimeMs = 8 * 60 * 1000;
+    const askResult = await brainMesh.ask({
+      from: 'agent.research.builder',
+      to: ['brain.research.source'],
+      op: 'crawler.search',
+      ctx: { userId: run.userId, agentResearchRunId: run.id },
+      body: {
+        full: true,
+        queries: buildResearchQuestions(run.name),
+        maxRequests: 180,
+        maxFollowUps: 28,
+        minContinuationScore: 1.45,
+        maxWaves: 10,
+        maxSearchExpansions: 72,
+        maxRuntimeMs: agentProfileMaxRuntimeMs,
+      },
+    }, { timeoutMs: agentProfileMaxRuntimeMs + 60_000 });
+    const crawl = askResult.replies?.find((reply) => reply.kind === 'reply')?.body || {};
+    for (const event of crawl.events || []) onEvent(event);
 
     setRun(run, { phase: 'profile-extraction', progress: 58 });
     append(run, {
@@ -85,11 +93,11 @@ async function executeRun(runId, createAgent) {
       progress: 58,
       level: 'debug',
       message: 'Parsing crawled pages for investment style, ownership, deals, source URLs, and public-company clues.',
-      data: { pages: crawl.pages.length, failures: crawl.failures.length },
+      data: { pages: (crawl.pages || []).length, failures: (crawl.failures || []).length },
     });
 
-    const sourceUrls = learnAgentSources(run.userId, run.name, crawl.pages);
-    const discovered = discoverInvestmentCompanies(crawl.pages, crawl.entityLeads || []);
+    const sourceUrls = learnAgentSources(run.userId, run.name, crawl.pages || []);
+    const discovered = discoverInvestmentCompanies(crawl.pages || [], crawl.entityLeads || []);
     const finnhubResearch = await enrichCompaniesWithFinnhub({
       userId: run.userId,
       name: run.name,
@@ -98,7 +106,7 @@ async function executeRun(runId, createAgent) {
     });
     const enrichedSymbols = new Set(finnhubResearch.map((item) => item.symbol));
     const eligibleDiscovered = discovered.filter((item) => enrichedSymbols.has(item.symbol));
-    const profile = buildProfileFromResearch({ name: run.name, pages: crawl.pages, sourceUrls, discovered: eligibleDiscovered, finnhubResearch });
+    const profile = buildProfileFromResearch({ name: run.name, pages: crawl.pages || [], sourceUrls, discovered: eligibleDiscovered, finnhubResearch });
 
     setRun(run, { phase: 'agent-profile-save', progress: 88 });
     append(run, {
@@ -190,7 +198,7 @@ function buildResearchQuestions(name) {
 
 function learnAgentSources(userId, name, pages) {
   const sources = pages
-    .sort((a, b) => (b.score?.relevance || 0) - (a.score?.relevance || 0))
+    .sort((a, b) => (b.relevance || 0) - (a.relevance || 0))
     .slice(0, 28)
     .map((page) => page.url)
     .filter(Boolean);
@@ -201,8 +209,8 @@ function learnAgentSources(userId, name, pages) {
       title: page.title || `${name} agent source`,
       sourceType: 'learned',
       discoveryMethod: `agent-research:${slugify(name)}`,
-      tags: ['agent-research', slugify(name), ...(page.score?.tags || [])].slice(0, 8),
-      relevanceScore: Math.min(95, 55 + (page.score?.relevance || 0) * 4),
+      tags: ['agent-research', slugify(name), ...(page.tags || [])].slice(0, 8),
+      relevanceScore: Math.min(95, 55 + (page.relevance || 0) * 4),
       credibilityScore: 55,
       notes: `Autonomous agent profile source for ${name}.`,
     });

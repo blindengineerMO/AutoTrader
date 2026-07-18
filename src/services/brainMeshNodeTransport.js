@@ -10,12 +10,26 @@ const logger = require('../utils/logger');
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const HEARTBEAT_TIMEOUT_MS = 90_000;
 const JOB_TIMEOUT_MS = 60_000;
+const JOB_TIMEOUT_BUFFER_MS = 30_000;
+
+// A job's wall-clock budget is the caller-requested maxRuntimeMs (the same
+// value the crawler engine itself is bounded by) plus a buffer for dispatch/
+// response latency, so full-mode crawls that legitimately run for minutes
+// aren't killed by a fixed cap sized for quick jobs.
+function jobTimeoutForEnvelope(envelope) {
+  const requested = Number(envelope?.body?.maxRuntimeMs);
+  if (Number.isFinite(requested) && requested > 0) {
+    return requested + JOB_TIMEOUT_BUFFER_MS;
+  }
+  return JOB_TIMEOUT_MS;
+}
 
 // Maps a remotely-dispatchable op to the local agent id that already fields
 // that op today, so a node's capability plugs into the existing dispatch
 // target instead of requiring callers to address nodes directly.
 const AGENT_FOR_OP = {
   'crawler.crawl': 'brain.research.source',
+  'crawler.search': 'brain.research.source',
   'llm.chat': ollamaBrain.OLLAMA_BRAIN_ID,
 };
 
@@ -66,7 +80,7 @@ function closeWithReason(socket, reason) {
 }
 
 function handleHello(socket, nonce, body) {
-  const { publicKey, joinToken, nodeId, signature, capabilities = [], clientVersion } = body || {};
+  const { publicKey, joinToken, nodeId, signature, capabilities = [], clientVersion, resources, health } = body || {};
   if (!publicKey) return closeWithReason(socket, 'missing publicKey');
 
   let node;
@@ -80,6 +94,7 @@ function handleHello(socket, nonce, body) {
       publicKey,
       clientVersion,
       status: 'online',
+      metadata: { resources },
     });
   } else {
     const existing = nodeRepo.getNodeByPublicKey(publicKey);
@@ -94,8 +109,10 @@ function handleHello(socket, nonce, body) {
       label: existing.label,
       clientVersion,
       status: 'online',
+      metadata: { resources },
     });
   }
+  if (health) nodeRepo.updateNodeHealth(node.id, health);
 
   const allowedCapabilities = capabilities.filter((cap) => brainMesh.isRemoteDispatchAllowed(cap.op));
   const rejectedCapabilities = capabilities.filter((cap) => !brainMesh.isRemoteDispatchAllowed(cap.op));
@@ -134,6 +151,7 @@ function handleHeartbeat(nodeId, body) {
   if (!connection) return;
   connection.lastSeenAt = Date.now();
   nodeRepo.setNodeStatus(nodeId, 'online');
+  if (body?.health) nodeRepo.updateNodeHealth(nodeId, body.health);
   if (Array.isArray(body?.capabilities)) {
     const allowed = body.capabilities.filter((cap) => brainMesh.isRemoteDispatchAllowed(cap.op));
     nodeRepo.upsertNodeCapabilities(nodeId, allowed);
@@ -172,7 +190,7 @@ function dispatchJobToNode(nodeId, userId, op, envelope) {
       nodeRepo.decrementNodeLoad(nodeId, op);
       nodeRepo.recordJobResult({ id: jobId, status: 'timeout', error: 'job timed out' });
       reject(new Error('remote job timed out'));
-    }, JOB_TIMEOUT_MS);
+    }, jobTimeoutForEnvelope(envelope));
 
     connection.pendingJobs.set(jobId, { resolve, reject, timeout, op });
     send(connection.socket, { kind: 'node.job.assign', body: { jobId, op, request: envelope.body } });

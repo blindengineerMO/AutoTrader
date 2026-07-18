@@ -27,7 +27,7 @@ const idleResearch = require('../src/services/idleResearchService');
 function stubDeepeningDependencies() {
   vi.spyOn(finnhub, 'researchCompany').mockResolvedValue({ symbol: 'AAA', available: true, errors: [] });
   vi.spyOn(researchQuestionReasoning, 'reasonFollowUpQuestions').mockResolvedValue({ reasoning: '', questions: [] });
-  vi.spyOn(crawleeCrawler, 'crawlAutonomousResearch').mockResolvedValue({ pages: [], entityLeads: [] });
+  vi.spyOn(crawleeCrawler, 'crawlAutonomousResearch').mockResolvedValue({ pages: [], failures: [], discovered: [], entityLeads: [] });
   vi.spyOn(eventOutcomeLabeling, 'backfillOutcomes').mockResolvedValue({});
 }
 
@@ -103,6 +103,8 @@ describe('idleResearchService.runIdleResearchTick', () => {
     });
     const crawlSpy = vi.spyOn(crawleeCrawler, 'crawlAutonomousResearch').mockResolvedValue({
       pages: [{ title: 'Supplier news', excerpt: 'AAA Corp supplier update', url: 'https://example.com/aaa' }],
+      failures: [],
+      discovered: [],
       entityLeads: [],
     });
     vi.spyOn(eventOutcomeLabeling, 'backfillOutcomes').mockResolvedValue({});

@@ -28,4 +28,10 @@ function clampNumber(value, min, max, fallback) {
   return Math.max(min, Math.min(max, Math.floor(parsed)));
 }
 
-module.exports = { normalizeLimitedStrings, isPublicHttpUrl, clampNumber };
+function clampFloat(value, min, max, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+module.exports = { normalizeLimitedStrings, isPublicHttpUrl, clampNumber, clampFloat };

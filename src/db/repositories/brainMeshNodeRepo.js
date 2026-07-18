@@ -38,6 +38,11 @@ const revokeJoinTokenStmt = db.prepare(`
   WHERE id = ? AND user_id = ? AND status = 'pending'
 `);
 
+const deleteJoinTokenStmt = db.prepare(`
+  DELETE FROM brain_mesh_join_tokens
+  WHERE id = ? AND user_id = ? AND status != 'pending'
+`);
+
 const upsertNodeStmt = db.prepare(`
   INSERT INTO brain_mesh_nodes (id, user_id, public_key, label, status, client_version, last_seen_at, metadata_json)
   VALUES (@id, @userId, @publicKey, @label, @status, @clientVersion, datetime('now'), @metadataJson)
@@ -61,6 +66,12 @@ const revokeNodeStmt = db.prepare(`
 const setNodeStatusStmt = db.prepare(`
   UPDATE brain_mesh_nodes SET status = ?, last_seen_at = datetime('now'), updated_at = datetime('now')
   WHERE id = ?
+`);
+
+const getNodeMetadataStmt = db.prepare(`SELECT metadata_json FROM brain_mesh_nodes WHERE id = ?`);
+
+const updateNodeMetadataStmt = db.prepare(`
+  UPDATE brain_mesh_nodes SET metadata_json = ?, updated_at = datetime('now') WHERE id = ?
 `);
 
 const upsertCapabilityStmt = db.prepare(`
@@ -130,6 +141,10 @@ function revokeJoinToken(tokenId, userId) {
   return revokeJoinTokenStmt.run(tokenId, userId).changes > 0;
 }
 
+function deleteJoinToken(tokenId, userId) {
+  return deleteJoinTokenStmt.run(tokenId, userId).changes > 0;
+}
+
 function upsertNode({ id: nodeId, userId, publicKey, label = null, status = 'online', clientVersion = null, metadata = {} }) {
   upsertNodeStmt.run({
     id: nodeId,
@@ -161,6 +176,18 @@ function revokeNode(nodeId, userId) {
 
 function setNodeStatus(nodeId, status) {
   return setNodeStatusStmt.run(status, nodeId).changes > 0;
+}
+
+function mergeNodeMetadata(nodeId, patch) {
+  const row = getNodeMetadataStmt.get(nodeId);
+  if (!row) return false;
+  const metadata = { ...JSON.parse(row.metadata_json || '{}'), ...patch };
+  updateNodeMetadataStmt.run(JSON.stringify(metadata), nodeId);
+  return true;
+}
+
+function updateNodeHealth(nodeId, health) {
+  return mergeNodeMetadata(nodeId, { health });
 }
 
 function upsertNodeCapabilities(nodeId, capabilities = []) {
@@ -209,6 +236,44 @@ function recordJobResult({ id: jobId, status, result = null, error = null }) {
   return true;
 }
 
+const jobStatusCountsStmt = db.prepare(`
+  SELECT node_id, status, COUNT(*) AS count
+  FROM brain_mesh_node_jobs
+  WHERE user_id = ?
+  GROUP BY node_id, status
+`);
+
+const recentJobFailuresStmt = db.prepare(`
+  SELECT node_id, op, status, error, completed_at
+  FROM brain_mesh_node_jobs
+  WHERE user_id = ? AND status IN ('failed', 'timeout') AND error IS NOT NULL
+  ORDER BY completed_at DESC
+  LIMIT 100
+`);
+
+function getJobStatsForUser(userId) {
+  const stats = {};
+  const ensure = (nodeId) => {
+    if (!stats[nodeId]) stats[nodeId] = { sent: 0, succeeded: 0, failed: 0, timedOut: 0, pending: 0, failureReasons: [] };
+    return stats[nodeId];
+  };
+  for (const row of jobStatusCountsStmt.all(userId)) {
+    const entry = ensure(row.node_id);
+    entry.sent += row.count;
+    if (row.status === 'completed') entry.succeeded += row.count;
+    else if (row.status === 'failed') entry.failed += row.count;
+    else if (row.status === 'timeout') entry.timedOut += row.count;
+    else if (row.status === 'assigned') entry.pending += row.count;
+  }
+  for (const row of recentJobFailuresStmt.all(userId)) {
+    const entry = ensure(row.node_id);
+    if (entry.failureReasons.length < 10) {
+      entry.failureReasons.push({ op: row.op, status: row.status, error: row.error, completedAt: row.completed_at });
+    }
+  }
+  return stats;
+}
+
 function deserializeNode(row) {
   if (!row) return null;
   return {
@@ -222,16 +287,20 @@ module.exports = {
   consumeJoinToken,
   listJoinTokens,
   revokeJoinToken,
+  deleteJoinToken,
   upsertNode,
   getNodeByPublicKey,
   getNode,
   listNodes,
   revokeNode,
   setNodeStatus,
+  mergeNodeMetadata,
+  updateNodeHealth,
   upsertNodeCapabilities,
   incrementNodeLoad,
   decrementNodeLoad,
   listNodesByCapability,
   recordJobAssigned,
   recordJobResult,
+  getJobStatsForUser,
 };
