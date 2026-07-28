@@ -71,6 +71,13 @@ const excludedSymbolSchema = z.object({
   exchange: z.string().max(80).optional(),
 });
 
+const ollamaInstanceSchema = z.object({
+  baseUrl: z.string().url(),
+  model: z.string().min(1).max(200),
+  label: z.string().max(120).optional(),
+  enabled: z.boolean().optional(),
+});
+
 const sourceSchema = z.object({
   url: z.string().url(),
   title: z.string().optional(),
@@ -185,6 +192,30 @@ router.post('/excluded-symbols', (req, res) => {
 
 router.delete('/excluded-symbols/:symbol', (req, res) => {
   res.json(settingsRepo.removeExcludedSymbol(req.user.id, req.params.symbol));
+});
+
+router.post('/ollama-instances', (req, res) => {
+  const parsed = ollamaInstanceSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid Ollama instance' });
+  try {
+    res.status(201).json(settingsRepo.addOllamaInstance(req.user.id, parsed.data));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.patch('/ollama-instances/:id', (req, res) => {
+  const parsed = ollamaInstanceSchema.partial().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid Ollama instance' });
+  try {
+    res.json(settingsRepo.updateOllamaInstance(req.user.id, req.params.id, parsed.data));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.delete('/ollama-instances/:id', (req, res) => {
+  res.json(settingsRepo.removeOllamaInstance(req.user.id, req.params.id));
 });
 
 router.post('/kill-switch/engage', (req, res) => {

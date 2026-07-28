@@ -346,6 +346,50 @@
       </div>
       <div class="floating-window-body">
         <div v-if="providerError" class="text-danger text-sm mb-4">{{ providerError }}</div>
+
+        <div class="mb-6">
+          <div class="provider-group-title mb-1">
+            <v-icon icon="mdi-server-network" class="text-accent" />
+            <span>Local Ollama instances</span>
+          </div>
+          <div class="text-xs text-white/45 mb-3">
+            Add one or more local Ollama endpoints. When a research chunk fails on one instance, the next enabled
+            instance is tried; a chunk is only dropped once it has failed on every instance twice.
+          </div>
+          <div v-if="ollamaInstanceError" class="text-danger text-sm mb-3">{{ ollamaInstanceError }}</div>
+
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+            <v-text-field v-model="newOllamaInstance.baseUrl" label="Base URL" placeholder="http://localhost:11434" variant="outlined" density="comfortable" hide-details />
+            <v-text-field v-model="newOllamaInstance.model" label="Model" placeholder="llama3.1" variant="outlined" density="comfortable" hide-details />
+            <v-text-field v-model="newOllamaInstance.label" label="Label (optional)" variant="outlined" density="comfortable" hide-details />
+          </div>
+          <GlassButton class="mb-4" :disabled="addingOllamaInstance" @click="addOllamaInstance">
+            {{ addingOllamaInstance ? 'Adding...' : 'Add instance' }}
+          </GlassButton>
+
+          <div class="source-memory-list">
+            <div v-if="!ollamaInstances.length" class="mini-glass p-4 text-white/42 text-sm">No Ollama instances configured yet.</div>
+            <div v-for="instance in ollamaInstances" :key="instance.id" class="source-memory-row mini-glass">
+              <div class="min-w-0">
+                <div class="font-medium truncate">{{ instance.label || instance.baseUrl }}</div>
+                <div class="hud-card-meta">
+                  <span class="hud-chip" :class="instance.enabled ? 'text-accent' : ''">{{ instance.enabled ? 'enabled' : 'disabled' }}</span>
+                  <span class="hud-chip">{{ instance.baseUrl }}</span>
+                  <span class="hud-chip">{{ instance.model }}</span>
+                </div>
+              </div>
+              <div class="flex gap-2">
+                <button class="hud-chip hud-chip-button" @click="toggleOllamaInstance(instance)">
+                  {{ instance.enabled ? 'disable' : 'enable' }}
+                </button>
+                <button class="hud-chip hud-chip-button" @click="removeOllamaInstance(instance)">
+                  remove
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div class="provider-groups">
           <section v-for="group in providerGroups" :key="group.type" class="provider-group mini-glass">
             <div class="provider-group-header">
@@ -681,6 +725,10 @@ const killSwitchEngaged = ref(false);
 const saving = ref(false);
 const saved = ref(false);
 const providers = ref([]);
+const ollamaInstances = ref([]);
+const newOllamaInstance = ref({ baseUrl: '', model: '', label: '' });
+const addingOllamaInstance = ref(false);
+const ollamaInstanceError = ref('');
 const providerDrafts = ref({});
 const providerError = ref('');
 const savingProvider = ref('');
@@ -829,6 +877,7 @@ async function load() {
   };
   syncSettingsStatus(data);
   killSwitchEngaged.value = Boolean(data.kill_switch_engaged);
+  ollamaInstances.value = data.ollama_instances || [];
   providers.value = providerRes.data;
   providerDrafts.value = Object.fromEntries(
     providerRes.data.map((provider) => [
@@ -1150,6 +1199,44 @@ async function saveProvider(provider) {
     providerError.value = err.response?.data?.error || 'Provider save failed';
   } finally {
     savingProvider.value = '';
+  }
+}
+
+async function addOllamaInstance() {
+  ollamaInstanceError.value = '';
+  addingOllamaInstance.value = true;
+  try {
+    await api.post('/settings/ollama-instances', {
+      baseUrl: newOllamaInstance.value.baseUrl,
+      model: newOllamaInstance.value.model,
+      label: newOllamaInstance.value.label || undefined,
+    });
+    newOllamaInstance.value = { baseUrl: '', model: '', label: '' };
+    await load();
+  } catch (err) {
+    ollamaInstanceError.value = err.response?.data?.error || 'Failed to add Ollama instance';
+  } finally {
+    addingOllamaInstance.value = false;
+  }
+}
+
+async function toggleOllamaInstance(instance) {
+  ollamaInstanceError.value = '';
+  try {
+    await api.patch(`/settings/ollama-instances/${instance.id}`, { enabled: !instance.enabled });
+    await load();
+  } catch (err) {
+    ollamaInstanceError.value = err.response?.data?.error || 'Failed to update Ollama instance';
+  }
+}
+
+async function removeOllamaInstance(instance) {
+  ollamaInstanceError.value = '';
+  try {
+    await api.delete(`/settings/ollama-instances/${instance.id}`);
+    await load();
+  } catch (err) {
+    ollamaInstanceError.value = err.response?.data?.error || 'Failed to remove Ollama instance';
   }
 }
 

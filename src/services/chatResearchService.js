@@ -1,6 +1,7 @@
 const OpenAI = require('openai');
 const { config } = require('../config');
 const providerCredentialRepo = require('../db/repositories/providerCredentialRepo');
+const settingsRepo = require('../db/repositories/settingsRepo');
 const researchSourceRepo = require('../db/repositories/researchSourceRepo');
 const duckAiWebClient = require('./duckAiWebClient');
 const ollamaClient = require('./ollamaClient');
@@ -273,28 +274,35 @@ function buildProviders(userId, systemPrompt = SYSTEM_PROMPT) {
   return providers;
 }
 
-function addOllamaProvider(providers, userId, systemPrompt) {
-  const userOllama = userId ? providerCredentialRepo.getSecret(userId, 'ollama') : null;
-  const ollamaBaseUrl = userOllama?.baseUrl || config.ollamaBaseUrl;
-  const ollamaModel = userOllama?.model || config.ollamaModel;
-  if (ollamaBaseUrl && ollamaModel) {
-    providers.push({
-      provider: 'ollama',
-      model: ollamaModel,
-      baseUrl: ollamaBaseUrl,
-      role: 'local-interpretation',
-      ask: (payload, { onEvent = () => {} } = {}) => askOllamaResearchAgent({
-        baseUrl: ollamaBaseUrl,
-        model: ollamaModel,
-        payload,
-        systemPrompt,
-        onEvent,
-      }),
-    });
+function resolveOllamaInstances(userId) {
+  const configured = userId ? settingsRepo.getOllamaInstances(userId).filter((instance) => instance.enabled) : [];
+  if (configured.length) {
+    return configured.map((instance) => ({ baseUrl: instance.baseUrl, model: instance.model, label: instance.label }));
   }
+  const userOllama = userId ? providerCredentialRepo.getSecret(userId, 'ollama') : null;
+  const baseUrl = userOllama?.baseUrl || config.ollamaBaseUrl;
+  const model = userOllama?.model || config.ollamaModel;
+  return baseUrl && model ? [{ baseUrl, model }] : [];
 }
 
-async function askOllamaResearchAgent({ baseUrl, model, payload, systemPrompt, onEvent = () => {} }) {
+function addOllamaProvider(providers, userId, systemPrompt) {
+  const instances = resolveOllamaInstances(userId);
+  if (!instances.length) return;
+  providers.push({
+    provider: 'ollama',
+    model: instances[0].model,
+    baseUrl: instances[0].baseUrl,
+    role: 'local-interpretation',
+    ask: (payload, { onEvent = () => {} } = {}) => askOllamaResearchAgent({
+      instances,
+      payload,
+      systemPrompt,
+      onEvent,
+    }),
+  });
+}
+
+async function askOllamaResearchAgent({ instances, payload, systemPrompt, onEvent = () => {} }) {
   const localSystemPrompt = buildLocalOllamaSystemPrompt(systemPrompt);
   const payloadChunks = buildOllamaPayloadChunks(payload, localSystemPrompt);
   if (payloadChunks.length > 1) {
@@ -326,34 +334,54 @@ async function askOllamaResearchAgent({ baseUrl, model, payload, systemPrompt, o
       });
     }
 
-    for (let attempt = 1; attempt <= OLLAMA_CHUNK_RETRY_ATTEMPTS; attempt += 1) {
+    const outcome = await runChunkAcrossInstances({
+      instances,
+      chunkedPayload,
+      systemPrompt: localSystemPrompt,
+      onEvent,
+      chunkIndex: index,
+      totalChunks: payloadChunks.length,
+    });
+    if (outcome.ok) results.push(outcome.result);
+  }
+
+  if (!results.length) {
+    throw new Error(`All ${payloadChunks.length} local Ollama research chunk(s) failed across ${instances.length} instance(s)`);
+  }
+
+  return mergeOllamaChunkResults(results);
+}
+
+// Tries a chunk on each configured instance in turn; if every instance fails,
+// the whole round repeats up to OLLAMA_CHUNK_RETRY_ATTEMPTS times before the
+// chunk is given up on (dropped from the merged result rather than aborting
+// the whole request) — malformed/truncated JSON is often a one-off
+// sampling/num_predict-cutoff fluke rather than a deterministic failure, so
+// retrying (on the same or a different instance) recovers most cases.
+async function runChunkAcrossInstances({ instances, chunkedPayload, systemPrompt, onEvent, chunkIndex, totalChunks }) {
+  for (let round = 1; round <= OLLAMA_CHUNK_RETRY_ATTEMPTS; round += 1) {
+    for (const instance of instances) {
       try {
         const result = config.ollamaToolCallingEnabled
-          ? await askOllamaResearchChunkWithTools({ baseUrl, model, payload: chunkedPayload, systemPrompt: localSystemPrompt, onEvent })
-          : await ollamaClient.askOllamaJson({ baseUrl, model, payload: chunkedPayload, systemPrompt: localSystemPrompt });
-        results.push(result);
-        break;
+          ? await askOllamaResearchChunkWithTools({ baseUrl: instance.baseUrl, model: instance.model, payload: chunkedPayload, systemPrompt, onEvent })
+          : await ollamaClient.askOllamaJson({ baseUrl: instance.baseUrl, model: instance.model, payload: chunkedPayload, systemPrompt });
+        return { ok: true, result };
       } catch (err) {
-        // Malformed/truncated JSON is often a one-off sampling/num_predict-cutoff
-        // fluke rather than a deterministic failure, so retrying the same chunk
-        // before giving up on it recovers most cases without any code change.
-        emit(onEvent, 'ollama-chunking', 36, 'warn', attempt < OLLAMA_CHUNK_RETRY_ATTEMPTS
-          ? 'Local Ollama research chunk failed; retrying chunk.'
-          : 'Local Ollama research chunk failed; skipping to next chunk.', {
-          chunk: index + 1,
-          totalChunks: payloadChunks.length,
-          attempt,
+        const isLastAttempt = round === OLLAMA_CHUNK_RETRY_ATTEMPTS && instance === instances[instances.length - 1];
+        emit(onEvent, 'ollama-chunking', 36, 'warn', isLastAttempt
+          ? 'Local Ollama research chunk failed on all instances; skipping chunk.'
+          : 'Local Ollama research chunk failed on instance; trying next instance.', {
+          chunk: chunkIndex + 1,
+          totalChunks,
+          round,
+          instance: instance.label || instance.baseUrl,
+          model: instance.model,
           error: err.message,
         });
       }
     }
   }
-
-  if (!results.length) {
-    throw new Error(`All ${payloadChunks.length} local Ollama research chunk(s) failed`);
-  }
-
-  return mergeOllamaChunkResults(results);
+  return { ok: false };
 }
 
 async function askOllamaResearchChunkWithTools({ baseUrl, model, payload, systemPrompt, onEvent = () => {} }) {
@@ -384,9 +412,17 @@ function buildOllamaPayloadChunks(payload, systemPrompt) {
   const maxPayloadTokens = Math.max(256, maxTokens - estimateTokens(systemPrompt) - OLLAMA_PROMPT_SAFETY_TOKENS);
   if (estimateTokens(JSON.stringify(payload || {})) <= maxPayloadTokens) return [payload || {}];
 
-  const base = buildOllamaChunkBase(payload);
+  let base = buildOllamaChunkBase(payload);
   const evidence = extractOllamaEvidencePieces(payload);
   if (!evidence.length) return splitOversizedPayload(payload, maxPayloadTokens);
+
+  // Base context fields (macro, consumer, disasterContext, etc.) repeat in every
+  // chunk. Cap their combined size so they can't crowd out the evidence budget
+  // (previously each field was trimmed independently with no combined ceiling).
+  const maxBaseTokens = Math.max(200, Math.floor(maxPayloadTokens * 0.4));
+  if (estimateTokens(JSON.stringify(base)) > maxBaseTokens) {
+    base = trimBaseToBudget(base, maxBaseTokens * TOKEN_CHAR_RATIO);
+  }
 
   const maxPayloadChars = maxPayloadTokens * TOKEN_CHAR_RATIO;
   const baseTokens = estimateTokens(JSON.stringify(base));
@@ -416,6 +452,25 @@ function buildOllamaPayloadChunks(payload, systemPrompt) {
 
   if (current.evidence.length) chunks.push(current);
   return chunks.map((chunk) => trimChunkToBudget(chunk, maxPayloadChars));
+}
+
+function trimBaseToBudget(base, maxBaseChars) {
+  const copy = { ...base };
+  const contextKeys = Object.keys(copy).filter((key) => key !== 'task' && typeof copy[key] === 'object' && copy[key] !== null);
+  while (JSON.stringify(copy).length > maxBaseChars && contextKeys.length) {
+    const largest = contextKeys.reduce((chosen, key) => {
+      const length = JSON.stringify(copy[key]).length;
+      return length > chosen.length ? { key, length } : chosen;
+    }, { key: contextKeys[0], length: 0 });
+    if (largest.length <= 200) {
+      delete copy[largest.key];
+      contextKeys.splice(contextKeys.indexOf(largest.key), 1);
+      continue;
+    }
+    const raw = JSON.stringify(copy[largest.key]);
+    copy[largest.key] = trimObjectForPrompt(copy[largest.key], Math.floor(raw.length * 0.6));
+  }
+  return copy;
 }
 
 function buildOllamaChunkBase(payload = {}) {

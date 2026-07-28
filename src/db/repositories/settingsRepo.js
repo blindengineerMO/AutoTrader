@@ -1,3 +1,4 @@
+const { randomUUID } = require('crypto');
 const db = require('../connection');
 
 const getByUser = db.prepare('SELECT * FROM user_settings WHERE user_id = ?');
@@ -30,6 +31,7 @@ const updateStmt = db.prepare(`
       alpaca_statement_download_day = @alpacaStatementDownloadDay,
       investing_mode = @investingMode,
       council_sizing_enabled = @councilSizingEnabled,
+      ollama_instances_json = @ollamaInstancesJson,
       updated_at = datetime('now')
   WHERE user_id = @userId
 `);
@@ -154,6 +156,7 @@ function update(userId, patch) {
     alpacaStatementDownloadDay: patch.alpacaStatementDownloadDay ?? current.alpaca_statement_download_day ?? 5,
     investingMode: patch.investingMode ?? current.investing_mode ?? 'balanced',
     councilSizingEnabled: patch.councilSizingEnabled ?? current.council_sizing_enabled ?? 0,
+    ollamaInstancesJson: patch.ollamaInstancesJson ?? current.ollama_instances_json ?? '[]',
   };
   updateStmt.run(merged);
   return get(userId);
@@ -197,6 +200,37 @@ function removeExcludedSymbol(userId, symbol) {
   return update(userId, { excludedSymbolsJson: JSON.stringify(filtered) });
 }
 
+function getOllamaInstances(userId) {
+  if (!userId) return [];
+  return parseOllamaInstances(get(userId)?.ollama_instances_json);
+}
+
+function addOllamaInstance(userId, entry) {
+  if (!userId) return null;
+  const normalized = normalizeOllamaInstance(entry);
+  if (!normalized) throw new Error('baseUrl and model are required');
+  const existing = getOllamaInstances(userId);
+  const merged = [...existing, normalized];
+  return update(userId, { ollamaInstancesJson: JSON.stringify(merged) });
+}
+
+function updateOllamaInstance(userId, id, patch) {
+  if (!userId) return null;
+  const existing = getOllamaInstances(userId);
+  const index = existing.findIndex((item) => item.id === id);
+  if (index === -1) return get(userId);
+  const merged = normalizeOllamaInstance({ ...existing[index], ...patch, id });
+  if (!merged) throw new Error('baseUrl and model are required');
+  existing[index] = merged;
+  return update(userId, { ollamaInstancesJson: JSON.stringify(existing) });
+}
+
+function removeOllamaInstance(userId, id) {
+  if (!userId) return null;
+  const filtered = getOllamaInstances(userId).filter((item) => item.id !== id);
+  return update(userId, { ollamaInstancesJson: JSON.stringify(filtered) });
+}
+
 function setKillSwitch(userId, engaged, triggeredBy, reason) {
   const tx = db.transaction(() => {
     update(userId, { killSwitchEngaged: engaged ? 1 : 0 });
@@ -219,6 +253,10 @@ module.exports = {
   setExcludedSymbols,
   addExcludedSymbol,
   removeExcludedSymbol,
+  getOllamaInstances,
+  addOllamaInstance,
+  updateOllamaInstance,
+  removeOllamaInstance,
   markSimulationStarted: (userId) => {
     markSimulationStartedStmt.run(userId);
     return get(userId);
@@ -250,6 +288,41 @@ function hydrate(row) {
     ...row,
     excluded_symbols_json: row.excluded_symbols_json || '[]',
     excluded_symbols: parseExcludedSymbols(row.excluded_symbols_json),
+    ollama_instances_json: row.ollama_instances_json || '[]',
+    ollama_instances: parseOllamaInstances(row.ollama_instances_json),
+  };
+}
+
+function parseOllamaInstances(value) {
+  try {
+    return normalizeOllamaInstances(JSON.parse(value || '[]'));
+  } catch {
+    return [];
+  }
+}
+
+function normalizeOllamaInstances(entries) {
+  if (!Array.isArray(entries)) return [];
+  const byId = new Map();
+  for (const entry of entries) {
+    const normalized = normalizeOllamaInstance(entry);
+    if (normalized) byId.set(normalized.id, normalized);
+  }
+  return [...byId.values()];
+}
+
+function normalizeOllamaInstance(entry) {
+  const baseUrl = cleanText(entry?.baseUrl || entry?.base_url || '');
+  const model = cleanText(entry?.model || '');
+  if (!baseUrl || !model) return null;
+  const now = new Date().toISOString();
+  return {
+    id: cleanText(entry?.id) || randomUUID(),
+    baseUrl,
+    model,
+    label: cleanText(entry?.label || ''),
+    enabled: entry?.enabled === undefined ? true : Boolean(entry.enabled),
+    addedAt: cleanText(entry?.addedAt || entry?.added_at || now),
   };
 }
 
