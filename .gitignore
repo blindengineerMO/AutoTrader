@@ -19,3 +19,11 @@ SOURCES.md
 SPEC.md
 DECISION.md
 PROJECT.md
+RESEARCH.md
+WEIGHT.md
+METHODS.md
+OPTIMIZATION.md
+/output/playwright/
+/docs
+.claude/
+.playwright-cli/
